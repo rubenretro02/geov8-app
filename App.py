@@ -169,7 +169,16 @@ class AutoUpdater:
 
             # Download to temp file
             response = requests.get(download_url, stream=True, timeout=120)
+
+            # Check if response is valid
+            if response.status_code != 200:
+                return False, f"Download failed: HTTP {response.status_code}"
+
             total_size = int(response.headers.get('content-length', 0))
+
+            # Verify it's an exe file (should be > 1MB typically)
+            if total_size > 0 and total_size < 100000:  # Less than 100KB is suspicious
+                return False, "Download file too small - check URL"
 
             temp_dir = tempfile.mkdtemp()
             temp_file = os.path.join(temp_dir, "GeoV8_new.exe")
@@ -184,6 +193,11 @@ class AutoUpdater:
                             percent = int(downloaded * 100 / total_size)
                             progress_callback(f"Downloading... {percent}%")
 
+            # Verify downloaded file size
+            actual_size = os.path.getsize(temp_file)
+            if actual_size < 100000:  # Less than 100KB
+                return False, f"Downloaded file too small ({actual_size} bytes)"
+
             if progress_callback:
                 progress_callback("Installing update...")
 
@@ -195,20 +209,55 @@ class AutoUpdater:
                 return False, "Cannot auto-update when running as script"
 
             # Create batch script to replace exe after app closes
+            # Uses retry logic and longer wait time
             batch_script = os.path.join(temp_dir, "update.bat")
             with open(batch_script, 'w') as f:
                 f.write(f'''@echo off
-timeout /t 2 /nobreak >nul
-del "{current_exe}"
-move "{temp_file}" "{current_exe}"
+echo Updating GeoV8...
+echo Waiting for app to close...
+
+REM Wait longer for app to fully close
+timeout /t 5 /nobreak >nul
+
+REM Try to delete old exe with retries
+set retries=10
+:retry_delete
+del /f /q "{current_exe}" 2>nul
+if exist "{current_exe}" (
+    set /a retries-=1
+    if %retries% gtr 0 (
+        echo Waiting for file to be released...
+        timeout /t 2 /nobreak >nul
+        goto retry_delete
+    ) else (
+        echo ERROR: Could not delete old file
+        pause
+        exit /b 1
+    )
+)
+
+REM Move new exe
+move /y "{temp_file}" "{current_exe}"
+if errorlevel 1 (
+    echo ERROR: Could not move new file
+    pause
+    exit /b 1
+)
+
+echo Update complete! Starting app...
+timeout /t 1 /nobreak >nul
 start "" "{current_exe}"
-rmdir /s /q "{temp_dir}"
+
+REM Cleanup
+rmdir /s /q "{temp_dir}" 2>nul
 ''')
 
             # Run batch script and exit
-            subprocess.Popen(batch_script, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            subprocess.Popen(batch_script, shell=True)
             return True, "Update started"
 
+        except requests.exceptions.RequestException as e:
+            return False, f"Network error: {str(e)[:50]}"
         except Exception as e:
             return False, str(e)
 
