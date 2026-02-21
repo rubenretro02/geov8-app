@@ -1,13 +1,11 @@
 ###############################################
-# Geo V8.37 - Dashboard Application
+# Geo V8.39 - Dashboard Application
 # New features:
 # - Auto-update system
 # - Dark/Light mode toggle
-# - Check history (last 5)
-# - Mini statistics
-# - Sound notifications
-# - Modern design with gradients
 # - HWID protection fix
+# - Persistent license storage
+# - Simplified UI
 ###############################################
 
 import customtkinter as ctk
@@ -48,7 +46,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.37"
+APP_VERSION = "8.39"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -100,6 +98,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 LOCAL_CONFIG_PATH = SCRIPT_DIR / "config_local.json"
 STATS_PATH = SCRIPT_DIR / "stats.json"
 HISTORY_PATH = SCRIPT_DIR / "history.json"
+LICENSE_PATH = SCRIPT_DIR / "license_data.json"  # New: persistent license storage
 
 
 class AutoUpdater:
@@ -366,7 +365,93 @@ class SupabaseManager:
         except:
             return None
 
+    def _save_license_locally(self, license_key, agent_name, expires_at):
+        """Save license data locally for persistence"""
+        try:
+            data = {
+                "license_key": license_key,
+                "agent_name": agent_name,
+                "expires_at": expires_at,
+                "hwid": self.hwid,
+                "saved_at": datetime.now().isoformat()
+            }
+            with open(LICENSE_PATH, 'w') as f:
+                json.dump(data, f)
+        except:
+            pass
+
+    def _load_license_locally(self):
+        """Load license data from local storage"""
+        try:
+            if LICENSE_PATH.exists():
+                with open(LICENSE_PATH, 'r') as f:
+                    data = json.load(f)
+                    # Verify HWID matches
+                    if data.get("hwid") == self.hwid:
+                        return data
+        except:
+            pass
+        return None
+
     def check_license(self):
+        # First, try to load from local storage
+        local_license = self._load_license_locally()
+
+        if local_license:
+            license_key = local_license.get("license_key")
+            expires_at = local_license.get("expires_at")
+
+            # Check if expired locally first
+            if expires_at:
+                try:
+                    exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                    if exp < datetime.now(exp.tzinfo):
+                        # License expired - need new one
+                        return False, "Expired"
+                except:
+                    pass
+
+            # Verify with server
+            try:
+                result = self._get("licenses", {"license_key": f"eq.{license_key}", "select": "*"})
+                if result and len(result) > 0:
+                    lic = result[0]
+                    if not lic.get("is_active", False):
+                        return False, "Expired"
+
+                    # Verify HWID matches
+                    server_hwid = lic.get("hwid")
+                    if server_hwid and server_hwid.strip() and server_hwid != self.hwid:
+                        # License transferred to another device
+                        return False, "Missing"
+
+                    expires_at = lic.get("expires_at")
+                    if expires_at:
+                        exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                        if exp < datetime.now(exp.tzinfo):
+                            return False, "Expired"
+                        self.days_left = self._calc_days(expires_at)
+                    else:
+                        self.days_left = None
+
+                    self.is_licensed = True
+                    self.license_key = lic.get("license_key")
+                    self.agent_name = lic.get("customer_name") or "Agent"
+
+                    # Update local storage
+                    self._save_license_locally(self.license_key, self.agent_name, expires_at)
+
+                    return True, self.agent_name
+            except:
+                # If server is unreachable but we have valid local license, allow it
+                if local_license.get("agent_name"):
+                    self.is_licensed = True
+                    self.license_key = local_license.get("license_key")
+                    self.agent_name = local_license.get("agent_name")
+                    self.days_left = self._calc_days(local_license.get("expires_at"))
+                    return True, self.agent_name
+
+        # No local license, check by HWID
         try:
             result = self._get("licenses", {"hwid": f"eq.{self.hwid}", "select": "*"})
             if result and len(result) > 0:
@@ -384,6 +469,10 @@ class SupabaseManager:
                 self.is_licensed = True
                 self.license_key = lic.get("license_key")
                 self.agent_name = lic.get("customer_name") or "Agent"
+
+                # Save locally for future
+                self._save_license_locally(self.license_key, self.agent_name, expires_at)
+
                 return True, self.agent_name
             return False, "Missing"
         except:
@@ -417,6 +506,8 @@ class SupabaseManager:
                     self.license_key = license_key
                     self.agent_name = lic.get("customer_name") or "Agent"
                     self.days_left = self._calc_days(expires_at)
+                    # Save locally
+                    self._save_license_locally(self.license_key, self.agent_name, expires_at)
                     return True, self.agent_name
 
             # No HWID yet - first activation, bind it
@@ -426,6 +517,8 @@ class SupabaseManager:
             self.license_key = license_key
             self.agent_name = lic.get("customer_name") or "Agent"
             self.days_left = self._calc_days(expires_at)
+            # Save locally
+            self._save_license_locally(self.license_key, self.agent_name, expires_at)
             return True, self.agent_name
         except:
             return False, "Connection error"
@@ -661,8 +754,8 @@ class GeoApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"Geo V{APP_VERSION}")
-        self.geometry("950x750")
-        self.minsize(850, 650)
+        self.geometry("950x550")
+        self.minsize(850, 450)
 
         # Theme state
         self.is_dark_mode = True
@@ -696,7 +789,6 @@ class GeoApp(ctk.CTk):
     def toggle_theme(self):
         self.is_dark_mode = not self.is_dark_mode
         self.update_theme()
-        # Refresh UI
         self.refresh_ui_colors()
 
     def refresh_ui_colors(self):
@@ -704,7 +796,6 @@ class GeoApp(ctk.CTk):
         try:
             self.configure(fg_color=COLORS["bg_dark"])
             if hasattr(self, 'main_container'):
-                # Recreate widgets with new colors
                 for widget in self.main_container.winfo_children():
                     widget.destroy()
                 self.create_header()
@@ -839,28 +930,10 @@ class GeoApp(ctk.CTk):
             ctk.CTkLabel(left, text=f"  |  {self.agent_name}", font=ctk.CTkFont(size=14),
                         text_color=COLORS["success"]).pack(side="left", padx=(10, 0))
 
-        # Mini stats in header
-        stats = self.stats_manager.get_stats()
-        stats_frame = ctk.CTkFrame(left, fg_color=COLORS["bg_card"], corner_radius=8)
-        stats_frame.pack(side="left", padx=(20, 0))
-        ctk.CTkLabel(stats_frame, text=f"✓ {stats['successful_checks']}",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                    text_color=COLORS["success"]).pack(side="left", padx=(10, 5), pady=5)
-        ctk.CTkLabel(stats_frame, text=f"✗ {stats['failed_checks']}",
-                    font=ctk.CTkFont(size=12, weight="bold"),
-                    text_color=COLORS["error"]).pack(side="left", padx=(5, 10), pady=5)
+        # Removed: Mini stats and theme toggle button
 
         right = ctk.CTkFrame(hf, fg_color="transparent")
         right.pack(side="right")
-
-        # Theme toggle button
-        theme_icon = "☀️" if self.is_dark_mode else "🌙"
-        self.theme_btn = ctk.CTkButton(right, text=theme_icon, width=35, height=35, corner_radius=8,
-                                       fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
-                                       border_width=1, border_color=COLORS["border"],
-                                       font=ctk.CTkFont(size=16),
-                                       command=self.toggle_theme)
-        self.theme_btn.pack(side="left", padx=5)
 
         self.dashboard_btn = ctk.CTkButton(right, text="Dashboard", width=100, height=35, corner_radius=8,
                                            fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"],
@@ -902,24 +975,7 @@ class GeoApp(ctk.CTk):
         self.city_card = StatusCard(ip_grid, "CITY")
         self.city_card.grid(row=0, column=3, padx=4, pady=4, sticky="nsew")
 
-        gps_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
-        gps_sec.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(gps_sec, text="  GPS COORDINATES", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color=COLORS["accent"]).pack(anchor="w", pady=(10, 6))
-        gps_grid = ctk.CTkFrame(gps_sec, fg_color="transparent")
-        gps_grid.pack(fill="x", padx=10, pady=(0, 10))
-        for i in range(5):
-            gps_grid.grid_columnconfigure(i, weight=1)
-        self.lat_card = StatusCard(gps_grid, "LATITUDE")
-        self.lat_card.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
-        self.lon_card = StatusCard(gps_grid, "LONGITUDE")
-        self.lon_card.grid(row=0, column=1, padx=4, pady=4, sticky="nsew")
-        self.coord_country_card = StatusCard(gps_grid, "COUNTRY")
-        self.coord_country_card.grid(row=0, column=2, padx=4, pady=4, sticky="nsew")
-        self.coord_state_card = StatusCard(gps_grid, "STATE")
-        self.coord_state_card.grid(row=0, column=3, padx=4, pady=4, sticky="nsew")
-        self.coord_city_card = StatusCard(gps_grid, "CITY")
-        self.coord_city_card.grid(row=0, column=4, padx=4, pady=4, sticky="nsew")
+        # Removed: GPS COORDINATES section
 
         ctrl = ctk.CTkFrame(self.dashboard_frame, fg_color="transparent")
         ctrl.pack(fill="x", pady=(10, 0))
@@ -950,51 +1006,7 @@ class GeoApp(ctk.CTk):
                                             text_color=COLORS["text_secondary"])
         self.countdown_label.pack(anchor="w", padx=12, pady=(0, 10))
 
-        # History section
-        history_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
-        history_sec.pack(fill="x", pady=(10, 0))
-
-        history_header = ctk.CTkFrame(history_sec, fg_color="transparent")
-        history_header.pack(fill="x", padx=12, pady=(10, 5))
-        ctk.CTkLabel(history_header, text="📜 RECENT CHECKS", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color=COLORS["accent"]).pack(side="left")
-
-        self.history_container = ctk.CTkFrame(history_sec, fg_color="transparent")
-        self.history_container.pack(fill="x", padx=12, pady=(0, 10))
-
-        self.update_history_display()
-
-    def update_history_display(self):
-        """Update the history display with recent checks"""
-        # Clear existing
-        for widget in self.history_container.winfo_children():
-            widget.destroy()
-
-        history = self.history_manager.get_history()
-
-        if not history:
-            ctk.CTkLabel(self.history_container, text="No checks yet",
-                        font=ctk.CTkFont(size=11),
-                        text_color=COLORS["text_secondary"]).pack(anchor="w", pady=5)
-            return
-
-        for entry in history:
-            row = ctk.CTkFrame(self.history_container, fg_color=COLORS["bg_card_hover"],
-                              corner_radius=6, height=30)
-            row.pack(fill="x", pady=2)
-            row.pack_propagate(False)
-
-            status_icon = "✓" if entry["status"] == "success" else "✗"
-            status_color = COLORS["success"] if entry["status"] == "success" else COLORS["error"]
-
-            ctk.CTkLabel(row, text=status_icon, font=ctk.CTkFont(size=14, weight="bold"),
-                        text_color=status_color, width=25).pack(side="left", padx=(10, 5))
-            ctk.CTkLabel(row, text=entry["timestamp"], font=ctk.CTkFont(size=11),
-                        text_color=COLORS["text_secondary"], width=60).pack(side="left", padx=(0, 10))
-            ctk.CTkLabel(row, text=entry.get("location", "--"), font=ctk.CTkFont(size=11),
-                        text_color=COLORS["text"]).pack(side="left", padx=(0, 10))
-            ctk.CTkLabel(row, text=entry.get("ip", "--"), font=ctk.CTkFont(size=11),
-                        text_color=COLORS["text_secondary"]).pack(side="right", padx=10)
+        # Removed: RECENT CHECKS / History section
 
     def toggle_auto_check(self):
         if self.auto_switch.get():
@@ -1079,19 +1091,7 @@ class GeoApp(ctk.CTk):
         self.state_card.set_value(self.current_data["state"], ip_color)
         self.city_card.set_value(self.current_data["city"], ip_color)
 
-        coord_valid = self.current_data.get("coord_valid")
-        if coord_valid is True:
-            gps_color = COLORS["success"]
-        elif coord_valid is False:
-            gps_color = COLORS["error"]
-        else:
-            gps_color = COLORS["text"]
-
-        self.lat_card.set_value(str(self.current_data["lat"]), gps_color)
-        self.lon_card.set_value(str(self.current_data["lon"]), gps_color)
-        self.coord_country_card.set_value(self.current_data.get("coord_country", "--"), gps_color)
-        self.coord_state_card.set_value(self.current_data.get("coord_state", "--"), gps_color)
-        self.coord_city_card.set_value(self.current_data.get("coord_city", "--"), gps_color)
+        # Removed: GPS coordinate cards update
 
     def send_notification(self, title, msg):
         if NOTIFICATIONS_AVAILABLE:
@@ -1503,10 +1503,8 @@ class GeoApp(ctk.CTk):
             self.update_cards()
             self.send_notification("Error", msg)
             self.supabase.log_check(ip, ip_loc, gps_loc, "error", msg)
-            # Record stats and history
+            # Record stats
             self.stats_manager.record_check(False)
-            self.history_manager.add_entry("error", msg[:30], ip or "--")
-            self.update_history_display()
             play_sound(success=False)
 
         try:
@@ -1606,23 +1604,18 @@ class GeoApp(ctk.CTk):
                 self.current_data["status"] = "error"
                 self.update_status("error", errors[0][:60])
                 self.send_notification("Location Error", errors[0])
-                # Record stats and history
+                # Record stats
                 self.stats_manager.record_check(False)
-                location_str = f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}"
-                self.history_manager.add_entry("error", location_str, ip or "--")
                 play_sound(success=False)
             else:
                 self.current_data["status"] = "success"
                 self.update_status("success", "Ready to work!")
                 self.send_notification("Ready to work!", f"{self.current_data['city']}, {self.current_data['state']}")
-                # Record stats and history
+                # Record stats
                 self.stats_manager.record_check(True)
-                location_str = f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}"
-                self.history_manager.add_entry("success", location_str, ip or "--")
                 play_sound(success=True)
 
             self.update_cards()
-            self.update_history_display()
 
         except Exception as e:
             import traceback
