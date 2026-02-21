@@ -1,0 +1,7 @@
+# Geo V8.5 Python App - Dependencies
+customtkinter>=5.2.0
+requests>=2.31.0
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+winotify>=1.1.0
+# supabase - NOT NEEDED, using requests directly
