@@ -710,6 +710,7 @@ class UpdateDialog(ctk.CTkToplevel):
         self.update_info = update_info
         self.auto_updater = auto_updater
         self.updating = False
+        self.can_close = True  # Allow closing by default
 
         self.update_idletasks()
         x = (self.winfo_screenwidth() - 450) // 2
@@ -718,10 +719,8 @@ class UpdateDialog(ctk.CTkToplevel):
         self.transient(parent)
         self.grab_set()
 
-        if update_info.get("force_update"):
-            self.protocol("WM_DELETE_WINDOW", lambda: None)
-        else:
-            self.protocol("WM_DELETE_WINDOW", self.skip_update)
+        # Always allow closing with X (user can force close)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Header
         ctk.CTkLabel(self, text="🚀 New Version Available!",
@@ -773,6 +772,7 @@ class UpdateDialog(ctk.CTkToplevel):
 
     def start_update(self):
         self.updating = True
+        self.can_close = False  # Prevent accidental close during download
         self.update_btn.configure(state="disabled", text="Updating...")
         if hasattr(self, 'skip_btn'):
             self.skip_btn.configure(state="disabled")
@@ -783,13 +783,31 @@ class UpdateDialog(ctk.CTkToplevel):
                 progress_callback=lambda msg: self.after(0, lambda: self.progress_label.configure(text=msg))
             )
             if success:
-                self.after(0, lambda: self.progress_label.configure(text="Restarting...", text_color=COLORS["success"]))
-                self.after(1000, lambda: sys.exit(0))
+                self.after(0, lambda: self.progress_label.configure(text="Closing app...", text_color=COLORS["success"]))
+                # Force close the app completely
+                self.after(500, self.force_exit)
             else:
-                # If update fails or no download_url, do not show dialog again
+                self.can_close = True  # Allow closing again on failure
                 self.after(0, lambda: self.update_failed(message))
 
         threading.Thread(target=do_update, daemon=True).start()
+
+    def force_exit(self):
+        """Force close the application for update"""
+        try:
+            self.parent.destroy()
+        except:
+            pass
+        # Force exit - this will definitely close the app
+        os._exit(0)
+
+    def on_close(self):
+        """Handle window close button"""
+        if self.updating and not self.can_close:
+            # If actively downloading, ask for confirmation
+            return
+        self.updating = False
+        self.destroy()
 
     def update_failed(self, message):
         self.updating = False
@@ -800,6 +818,7 @@ class UpdateDialog(ctk.CTkToplevel):
 
     def skip_update(self):
         self.updating = False
+        self.can_close = True
         self.destroy()
 
 
