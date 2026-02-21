@@ -129,7 +129,8 @@ class AutoUpdater:
                     release_notes = latest.get("release_notes", "")
                     force_update = latest.get("force_update", False)
 
-                    if self._compare_versions(latest_version, APP_VERSION) > 0:
+                    # Only show update if there's a valid download URL
+                    if self._compare_versions(latest_version, APP_VERSION) > 0 and download_url:
                         return {
                             "available": True,
                             "version": latest_version,
@@ -161,6 +162,8 @@ class AutoUpdater:
     def download_and_install(self, download_url, progress_callback=None):
         """Download new version and install it"""
         try:
+            if not download_url:
+                return False, "No download URL"
             if progress_callback:
                 progress_callback("Downloading update...")
 
@@ -734,6 +737,7 @@ class UpdateDialog(ctk.CTkToplevel):
                 self.after(0, lambda: self.progress_label.configure(text="Restarting...", text_color=COLORS["success"]))
                 self.after(1000, lambda: sys.exit(0))
             else:
+                # If update fails or no download_url, do not show dialog again
                 self.after(0, lambda: self.update_failed(message))
 
         threading.Thread(target=do_update, daemon=True).start()
@@ -754,8 +758,8 @@ class GeoApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"Geo V{APP_VERSION}")
-        self.geometry("950x550")
-        self.minsize(850, 450)
+        self.geometry("950x700")
+        self.minsize(850, 600)
 
         # Theme state
         self.is_dark_mode = True
@@ -975,7 +979,25 @@ class GeoApp(ctk.CTk):
         self.city_card = StatusCard(ip_grid, "CITY")
         self.city_card.grid(row=0, column=3, padx=4, pady=4, sticky="nsew")
 
-        # Removed: GPS COORDINATES section
+        # GPS COORDINATES section
+        gps_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
+        gps_sec.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(gps_sec, text="  GPS COORDINATES", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLORS["accent"]).pack(anchor="w", pady=(10, 6))
+        gps_grid = ctk.CTkFrame(gps_sec, fg_color="transparent")
+        gps_grid.pack(fill="x", padx=10, pady=(0, 10))
+        for i in range(5):
+            gps_grid.grid_columnconfigure(i, weight=1)
+        self.lat_card = StatusCard(gps_grid, "LATITUDE")
+        self.lat_card.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
+        self.lon_card = StatusCard(gps_grid, "LONGITUDE")
+        self.lon_card.grid(row=0, column=1, padx=4, pady=4, sticky="nsew")
+        self.coord_country_card = StatusCard(gps_grid, "COUNTRY")
+        self.coord_country_card.grid(row=0, column=2, padx=4, pady=4, sticky="nsew")
+        self.coord_state_card = StatusCard(gps_grid, "STATE")
+        self.coord_state_card.grid(row=0, column=3, padx=4, pady=4, sticky="nsew")
+        self.coord_city_card = StatusCard(gps_grid, "CITY")
+        self.coord_city_card.grid(row=0, column=4, padx=4, pady=4, sticky="nsew")
 
         ctrl = ctk.CTkFrame(self.dashboard_frame, fg_color="transparent")
         ctrl.pack(fill="x", pady=(10, 0))
@@ -1005,8 +1027,6 @@ class GeoApp(ctk.CTk):
         self.countdown_label = ctk.CTkLabel(auto_sec, text="", font=ctk.CTkFont(size=11),
                                             text_color=COLORS["text_secondary"])
         self.countdown_label.pack(anchor="w", padx=12, pady=(0, 10))
-
-        # Removed: RECENT CHECKS / History section
 
     def toggle_auto_check(self):
         if self.auto_switch.get():
@@ -1091,7 +1111,20 @@ class GeoApp(ctk.CTk):
         self.state_card.set_value(self.current_data["state"], ip_color)
         self.city_card.set_value(self.current_data["city"], ip_color)
 
-        # Removed: GPS coordinate cards update
+        # GPS coordinate cards update
+        coord_valid = self.current_data.get("coord_valid")
+        if coord_valid is True:
+            gps_color = COLORS["success"]
+        elif coord_valid is False:
+            gps_color = COLORS["error"]
+        else:
+            gps_color = COLORS["text"]
+
+        self.lat_card.set_value(str(self.current_data["lat"]), gps_color)
+        self.lon_card.set_value(str(self.current_data["lon"]), gps_color)
+        self.coord_country_card.set_value(self.current_data.get("coord_country", "--"), gps_color)
+        self.coord_state_card.set_value(self.current_data.get("coord_state", "--"), gps_color)
+        self.coord_city_card.set_value(self.current_data.get("coord_city", "--"), gps_color)
 
     def send_notification(self, title, msg):
         if NOTIFICATIONS_AVAILABLE:
