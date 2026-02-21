@@ -1,5 +1,5 @@
 ###############################################
-# Geo V8.42 - Dashboard Application
+# Geo V8.43 - Dashboard Application
 # New features:
 # - Auto-update system
 # - Dark/Light mode toggle
@@ -46,7 +46,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.42"
+APP_VERSION = "8.43"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -1714,6 +1714,16 @@ class GeoApp(ctk.CTk):
         lic = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         lic.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(lic, text="License", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 5))
+
+        # Show license key with last 4 characters hidden
+        license_key = self.supabase.license_key or ""
+        if len(license_key) > 4:
+            masked_license = license_key[:-4] + "****"
+        else:
+            masked_license = "****"
+        ctk.CTkLabel(lic, text=f"License: {masked_license}", font=ctk.CTkFont(size=11),
+                    text_color=COLORS["accent"]).pack(anchor="w", padx=16)
+
         masked_hwid = "****" + self.supabase.hwid[-6:]
         ctk.CTkLabel(lic, text=f"ID: {masked_hwid}", font=ctk.CTkFont(size=11),
                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=16)
