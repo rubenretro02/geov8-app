@@ -1,5 +1,5 @@
 ###############################################
-# Geo V8.43 - Dashboard Application
+# Geo V8.44 - Dashboard Application
 # New features:
 # - Auto-update system
 # - Dark/Light mode toggle
@@ -46,7 +46,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.43"
+APP_VERSION = "8.44"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
