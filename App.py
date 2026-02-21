@@ -46,7 +46,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.44"
+APP_VERSION = "8.45"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -992,15 +992,14 @@ class GeoApp(ctk.CTk):
         ctk.CTkLabel(left, text=f"GEO V{APP_VERSION}", font=ctk.CTkFont(size=28, weight="bold"),
                      text_color=COLORS["accent"]).pack(side="left")
 
+        # Agent name - larger and white
+        ctk.CTkLabel(left, text=f"  |  {self.agent_name}", font=ctk.CTkFont(size=20, weight="bold"),
+                    text_color="#FFFFFF").pack(side="left", padx=(10, 0))
+
         if self.days_left is not None:
             days_color = COLORS["error"] if self.days_left <= 3 else COLORS["warning"] if self.days_left <= 7 else COLORS["success"]
-            ctk.CTkLabel(left, text=f"  |  {self.agent_name}", font=ctk.CTkFont(size=14),
-                        text_color=COLORS["success"]).pack(side="left", padx=(10, 0))
             ctk.CTkLabel(left, text=f"  ({self.days_left} days)", font=ctk.CTkFont(size=14),
-                        text_color=days_color).pack(side="left")
-        else:
-            ctk.CTkLabel(left, text=f"  |  {self.agent_name}", font=ctk.CTkFont(size=14),
-                        text_color=COLORS["success"]).pack(side="left", padx=(10, 0))
+                        text_color=days_color).pack(side="left", padx=(5, 0))
 
         # Removed: Mini stats and theme toggle button
 
