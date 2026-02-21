@@ -1,7 +1,13 @@
 ###############################################
-# Geo V8.36 - Simple Dashboard Application
-# Just a GUI app - no background services
-# Auto-runs check ONLY when launched from Startup folder
+# Geo V8.37 - Dashboard Application
+# New features:
+# - Auto-update system
+# - Dark/Light mode toggle
+# - Check history (last 5)
+# - Mini statistics
+# - Sound notifications
+# - Modern design with gradients
+# - HWID protection fix
 ###############################################
 
 import customtkinter as ctk
@@ -18,12 +24,21 @@ import hashlib
 import platform
 import uuid
 from datetime import datetime
+import subprocess
+import tempfile
+import shutil
 
 try:
     from winotify import Notification, audio
     NOTIFICATIONS_AVAILABLE = True
 except ImportError:
     NOTIFICATIONS_AVAILABLE = False
+
+try:
+    import winsound
+    SOUND_AVAILABLE = True
+except ImportError:
+    SOUND_AVAILABLE = False
 
 SELENIUM_AVAILABLE = False
 try:
@@ -32,8 +47,8 @@ try:
 except ImportError:
     pass
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+# App Version - IMPORTANT for auto-update
+APP_VERSION = "8.37"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -42,28 +57,245 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 DEFAULT_ALLOWED_STATES = ["Florida", "Texas"]
 DEFAULT_ALLOWED_COUNTRIES = ["United States", "USA", "US"]
 
-COLORS = {
-    "bg_dark": "#0f0f0f",
-    "bg_card": "#1a1a1a",
-    "bg_card_hover": "#252525",
+# Theme colors - Dark Mode
+COLORS_DARK = {
+    "bg_dark": "#0a0a0f",
+    "bg_card": "#12121a",
+    "bg_card_hover": "#1a1a25",
     "accent": "#00d4aa",
-    "accent_dark": "#00a080",
-    "success": "#00c853",
-    "error": "#ff5252",
-    "warning": "#ffab00",
+    "accent_secondary": "#7c3aed",
+    "accent_gradient_start": "#00d4aa",
+    "accent_gradient_end": "#00a080",
+    "success": "#10b981",
+    "error": "#ef4444",
+    "warning": "#f59e0b",
     "text": "#ffffff",
-    "text_secondary": "#888888",
-    "border": "#333333"
+    "text_secondary": "#71717a",
+    "border": "#27272a",
+    "header_bg": "#09090b",
 }
+
+# Theme colors - Light Mode
+COLORS_LIGHT = {
+    "bg_dark": "#f4f4f5",
+    "bg_card": "#ffffff",
+    "bg_card_hover": "#f9f9f9",
+    "accent": "#059669",
+    "accent_secondary": "#7c3aed",
+    "accent_gradient_start": "#059669",
+    "accent_gradient_end": "#047857",
+    "success": "#059669",
+    "error": "#dc2626",
+    "warning": "#d97706",
+    "text": "#18181b",
+    "text_secondary": "#71717a",
+    "border": "#e4e4e7",
+    "header_bg": "#ffffff",
+}
+
+# Start with dark mode
+COLORS = COLORS_DARK.copy()
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LOCAL_CONFIG_PATH = SCRIPT_DIR / "config_local.json"
+STATS_PATH = SCRIPT_DIR / "stats.json"
+HISTORY_PATH = SCRIPT_DIR / "history.json"
+
+
+class AutoUpdater:
+    """Handles automatic app updates"""
+    def __init__(self, supabase_url, supabase_key):
+        self.base_url = f"{supabase_url}/rest/v1"
+        self.headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json"
+        }
+
+    def check_for_updates(self):
+        """Check if there's a newer version available"""
+        try:
+            r = requests.get(
+                f"{self.base_url}/app_version",
+                headers=self.headers,
+                params={"select": "*", "order": "created_at.desc", "limit": "1"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data and len(data) > 0:
+                    latest = data[0]
+                    latest_version = latest.get("version", "0")
+                    download_url = latest.get("download_url", "")
+                    release_notes = latest.get("release_notes", "")
+                    force_update = latest.get("force_update", False)
+
+                    if self._compare_versions(latest_version, APP_VERSION) > 0:
+                        return {
+                            "available": True,
+                            "version": latest_version,
+                            "download_url": download_url,
+                            "release_notes": release_notes,
+                            "force_update": force_update
+                        }
+            return {"available": False}
+        except Exception as e:
+            print(f"Update check error: {e}")
+            return {"available": False}
+
+    def _compare_versions(self, v1, v2):
+        """Compare version strings. Returns >0 if v1>v2, <0 if v1<v2, 0 if equal"""
+        try:
+            parts1 = [int(x) for x in v1.replace("v", "").split(".")]
+            parts2 = [int(x) for x in v2.replace("v", "").split(".")]
+            for i in range(max(len(parts1), len(parts2))):
+                p1 = parts1[i] if i < len(parts1) else 0
+                p2 = parts2[i] if i < len(parts2) else 0
+                if p1 > p2:
+                    return 1
+                elif p1 < p2:
+                    return -1
+            return 0
+        except:
+            return 0
+
+    def download_and_install(self, download_url, progress_callback=None):
+        """Download new version and install it"""
+        try:
+            if progress_callback:
+                progress_callback("Downloading update...")
+
+            # Download to temp file
+            response = requests.get(download_url, stream=True, timeout=120)
+            total_size = int(response.headers.get('content-length', 0))
+
+            temp_dir = tempfile.mkdtemp()
+            temp_file = os.path.join(temp_dir, "GeoV8_new.exe")
+
+            downloaded = 0
+            with open(temp_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback and total_size > 0:
+                            percent = int(downloaded * 100 / total_size)
+                            progress_callback(f"Downloading... {percent}%")
+
+            if progress_callback:
+                progress_callback("Installing update...")
+
+            # Get current executable path
+            if getattr(sys, 'frozen', False):
+                current_exe = sys.executable
+            else:
+                # Running as script - can't auto-update
+                return False, "Cannot auto-update when running as script"
+
+            # Create batch script to replace exe after app closes
+            batch_script = os.path.join(temp_dir, "update.bat")
+            with open(batch_script, 'w') as f:
+                f.write(f'''@echo off
+timeout /t 2 /nobreak >nul
+del "{current_exe}"
+move "{temp_file}" "{current_exe}"
+start "" "{current_exe}"
+rmdir /s /q "{temp_dir}"
+''')
+
+            # Run batch script and exit
+            subprocess.Popen(batch_script, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            return True, "Update started"
+
+        except Exception as e:
+            return False, str(e)
+
+
+class StatsManager:
+    """Manages check statistics"""
+    def __init__(self):
+        self.stats = self._load_stats()
+
+    def _load_stats(self):
+        try:
+            if STATS_PATH.exists():
+                with open(STATS_PATH, 'r') as f:
+                    return json.load(f)
+        except:
+            pass
+        return {"total_checks": 0, "successful_checks": 0, "failed_checks": 0}
+
+    def _save_stats(self):
+        try:
+            with open(STATS_PATH, 'w') as f:
+                json.dump(self.stats, f)
+        except:
+            pass
+
+    def record_check(self, success):
+        self.stats["total_checks"] += 1
+        if success:
+            self.stats["successful_checks"] += 1
+        else:
+            self.stats["failed_checks"] += 1
+        self._save_stats()
+
+    def get_stats(self):
+        return self.stats
+
+
+class HistoryManager:
+    """Manages check history"""
+    def __init__(self, max_items=5):
+        self.max_items = max_items
+        self.history = self._load_history()
+
+    def _load_history(self):
+        try:
+            if HISTORY_PATH.exists():
+                with open(HISTORY_PATH, 'r') as f:
+                    return json.load(f)
+        except:
+            pass
+        return []
+
+    def _save_history(self):
+        try:
+            with open(HISTORY_PATH, 'w') as f:
+                json.dump(self.history, f)
+        except:
+            pass
+
+    def add_entry(self, status, location, ip):
+        entry = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "status": status,
+            "location": location,
+            "ip": ip
+        }
+        self.history.insert(0, entry)
+        self.history = self.history[:self.max_items]
+        self._save_history()
+
+    def get_history(self):
+        return self.history
+
+
+def play_sound(success=True):
+    """Play notification sound"""
+    if SOUND_AVAILABLE:
+        try:
+            if success:
+                winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            else:
+                winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except:
+            pass
 
 
 def get_hardware_id():
     """Generate HWID from physical hardware (doesn't change on Windows reset)"""
-    import subprocess
-
     def run_wmic(cmd):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, shell=True, timeout=10)
@@ -171,6 +403,23 @@ class SupabaseManager:
                 exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                 if exp < datetime.now(exp.tzinfo):
                     return False, "Expired"
+
+            # FIX: Check if license already has HWID bound to another device
+            existing_hwid = lic.get("hwid")
+            if existing_hwid and existing_hwid.strip():
+                # License already has HWID
+                if existing_hwid != self.hwid:
+                    # Different device - REJECT
+                    return False, "License already in use on another device"
+                else:
+                    # Same device - already activated, just continue
+                    self.is_licensed = True
+                    self.license_key = license_key
+                    self.agent_name = lic.get("customer_name") or "Agent"
+                    self.days_left = self._calc_days(expires_at)
+                    return True, self.agent_name
+
+            # No HWID yet - first activation, bind it
             if not self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"}):
                 return False, "Registration failed"
             self.is_licensed = True
@@ -272,7 +521,7 @@ class LicenseDialog(ctk.CTkToplevel):
         self.status_label.pack(pady=(0, 10))
 
         self.activate_btn = ctk.CTkButton(self, text="Activate", width=150, height=40,
-                                          fg_color=COLORS["accent"], hover_color=COLORS["accent_dark"],
+                                          fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"],
                                           text_color="#000", font=ctk.CTkFont(weight="bold"),
                                           command=self.activate)
         self.activate_btn.pack(pady=10)
@@ -304,22 +553,190 @@ class LicenseDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class UpdateDialog(ctk.CTkToplevel):
+    """Dialog for app updates"""
+    def __init__(self, parent, update_info, auto_updater):
+        super().__init__(parent)
+        self.title("Update Available")
+        self.geometry("450x300")
+        self.configure(fg_color=COLORS["bg_dark"])
+        self.resizable(False, False)
+        self.parent = parent
+        self.update_info = update_info
+        self.auto_updater = auto_updater
+        self.updating = False
+
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() - 450) // 2
+        y = (self.winfo_screenheight() - 300) // 2
+        self.geometry(f"450x300+{x}+{y}")
+        self.transient(parent)
+        self.grab_set()
+
+        if update_info.get("force_update"):
+            self.protocol("WM_DELETE_WINDOW", lambda: None)
+        else:
+            self.protocol("WM_DELETE_WINDOW", self.skip_update)
+
+        # Header
+        ctk.CTkLabel(self, text="🚀 New Version Available!",
+                    font=ctk.CTkFont(size=20, weight="bold"),
+                    text_color=COLORS["accent"]).pack(pady=(25, 10))
+
+        ctk.CTkLabel(self, text=f"Version {update_info.get('version', '?')} is ready",
+                    font=ctk.CTkFont(size=14),
+                    text_color=COLORS["text"]).pack(pady=(0, 15))
+
+        # Release notes
+        notes = update_info.get("release_notes", "Bug fixes and improvements")
+        notes_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=10)
+        notes_frame.pack(fill="x", padx=30, pady=10)
+        ctk.CTkLabel(notes_frame, text="What's new:",
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=COLORS["text_secondary"]).pack(anchor="w", padx=15, pady=(10, 5))
+        ctk.CTkLabel(notes_frame, text=notes,
+                    font=ctk.CTkFont(size=12),
+                    text_color=COLORS["text"], wraplength=380).pack(anchor="w", padx=15, pady=(0, 10))
+
+        # Progress label
+        self.progress_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=11),
+                                           text_color=COLORS["warning"])
+        self.progress_label.pack(pady=(10, 5))
+
+        # Buttons
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=15)
+
+        self.update_btn = ctk.CTkButton(btn_frame, text="Update Now", width=140, height=40,
+                                        fg_color=COLORS["accent"],
+                                        hover_color=COLORS["accent_gradient_end"],
+                                        text_color="#000", font=ctk.CTkFont(weight="bold"),
+                                        command=self.start_update)
+        self.update_btn.pack(side="left", padx=5)
+
+        if not update_info.get("force_update"):
+            self.skip_btn = ctk.CTkButton(btn_frame, text="Skip", width=100, height=40,
+                                          fg_color=COLORS["bg_card"],
+                                          hover_color=COLORS["bg_card_hover"],
+                                          border_width=1, border_color=COLORS["border"],
+                                          command=self.skip_update)
+            self.skip_btn.pack(side="left", padx=5)
+        else:
+            ctk.CTkLabel(self, text="This update is required",
+                        font=ctk.CTkFont(size=10),
+                        text_color=COLORS["error"]).pack()
+
+    def start_update(self):
+        self.updating = True
+        self.update_btn.configure(state="disabled", text="Updating...")
+        if hasattr(self, 'skip_btn'):
+            self.skip_btn.configure(state="disabled")
+
+        def do_update():
+            success, message = self.auto_updater.download_and_install(
+                self.update_info.get("download_url"),
+                progress_callback=lambda msg: self.after(0, lambda: self.progress_label.configure(text=msg))
+            )
+            if success:
+                self.after(0, lambda: self.progress_label.configure(text="Restarting...", text_color=COLORS["success"]))
+                self.after(1000, lambda: sys.exit(0))
+            else:
+                self.after(0, lambda: self.update_failed(message))
+
+        threading.Thread(target=do_update, daemon=True).start()
+
+    def update_failed(self, message):
+        self.updating = False
+        self.progress_label.configure(text=f"Update failed: {message}", text_color=COLORS["error"])
+        self.update_btn.configure(state="normal", text="Retry")
+        if hasattr(self, 'skip_btn'):
+            self.skip_btn.configure(state="normal")
+
+    def skip_update(self):
+        self.updating = False
+        self.destroy()
+
+
 class GeoApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Geo V8.36")
-        self.geometry("900x700")
-        self.minsize(800, 600)
-        self.configure(fg_color=COLORS["bg_dark"])
+        self.title(f"Geo V{APP_VERSION}")
+        self.geometry("950x750")
+        self.minsize(850, 650)
+
+        # Theme state
+        self.is_dark_mode = True
+        self.update_theme()
 
         # Set window icon
         icon_path = SCRIPT_DIR / "geo.ico"
         if icon_path.exists():
             self.iconbitmap(str(icon_path))
+
         self.supabase = SupabaseManager()
+        self.auto_updater = AutoUpdater(SUPABASE_URL, SUPABASE_KEY)
+        self.stats_manager = StatsManager()
+        self.history_manager = HistoryManager()
         self.auto_check_job = None
         self.countdown_job = None
-        self.after(100, self.check_license)
+
+        # Check for updates first
+        self.after(100, self.check_for_updates)
+
+    def update_theme(self):
+        global COLORS
+        if self.is_dark_mode:
+            COLORS = COLORS_DARK.copy()
+            ctk.set_appearance_mode("dark")
+        else:
+            COLORS = COLORS_LIGHT.copy()
+            ctk.set_appearance_mode("light")
+        self.configure(fg_color=COLORS["bg_dark"])
+
+    def toggle_theme(self):
+        self.is_dark_mode = not self.is_dark_mode
+        self.update_theme()
+        # Refresh UI
+        self.refresh_ui_colors()
+
+    def refresh_ui_colors(self):
+        """Update all UI elements with new theme colors"""
+        try:
+            self.configure(fg_color=COLORS["bg_dark"])
+            if hasattr(self, 'main_container'):
+                # Recreate widgets with new colors
+                for widget in self.main_container.winfo_children():
+                    widget.destroy()
+                self.create_header()
+                self.content_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+                self.content_frame.pack(fill="both", expand=True, pady=(20, 0))
+                self.dashboard_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+                self.settings_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+                self.create_dashboard()
+                self.create_settings()
+                self.show_dashboard()
+                self.load_config()
+        except:
+            pass
+
+    def check_for_updates(self):
+        """Check for app updates before license check"""
+        def do_check():
+            update_info = self.auto_updater.check_for_updates()
+            self.after(0, lambda: self.handle_update_result(update_info))
+        threading.Thread(target=do_check, daemon=True).start()
+
+    def handle_update_result(self, update_info):
+        if update_info.get("available"):
+            self.show_update_dialog(update_info)
+        else:
+            self.check_license()
+
+    def show_update_dialog(self, update_info):
+        dialog = UpdateDialog(self, update_info, self.auto_updater)
+        self.wait_window(dialog)
+        if not dialog.updating:
+            self.check_license()
 
     def check_license(self):
         is_valid, message = self.supabase.check_license()
@@ -352,27 +769,20 @@ class GeoApp(ctk.CTk):
         self.auto_interval = 5
         self.create_widgets()
         self.after(200, self.load_config)
-        # Auto-run check on startup (after config loads)
         self.after(1000, self.auto_run_on_startup)
 
     def is_running_from_startup(self):
-        """Check if app is running from Windows Startup folder"""
         try:
-            # Get the path where the app is running from
             if getattr(sys, 'frozen', False):
-                # Running as compiled exe (PyInstaller)
                 app_path = sys.executable
             else:
-                # Running as script
                 app_path = os.path.abspath(__file__)
 
             app_path_lower = app_path.lower()
 
-            # Check if path contains "startup" folder
             if "startup" in app_path_lower:
                 return True
 
-            # Also check the specific Windows Startup path
             startup_path = os.path.join(
                 os.environ.get("APPDATA", ""),
                 "Microsoft", "Windows", "Start Menu", "Programs", "Startup"
@@ -386,12 +796,9 @@ class GeoApp(ctk.CTk):
             return False
 
     def auto_run_on_startup(self):
-        """Automatically run check ONLY when launched from Startup folder"""
-        # Only auto-run if launched from Startup folder
         if not self.is_running_from_startup():
             return
 
-        # Only run if we have all required settings
         try:
             u = self.username_entry.get().strip()
             p = self.password_entry.get().strip()
@@ -419,7 +826,7 @@ class GeoApp(ctk.CTk):
         hf.pack(fill="x")
         left = ctk.CTkFrame(hf, fg_color="transparent")
         left.pack(side="left")
-        ctk.CTkLabel(left, text="GEO V8.36", font=ctk.CTkFont(size=28, weight="bold"),
+        ctk.CTkLabel(left, text=f"GEO V{APP_VERSION}", font=ctk.CTkFont(size=28, weight="bold"),
                      text_color=COLORS["accent"]).pack(side="left")
 
         if self.days_left is not None:
@@ -432,10 +839,31 @@ class GeoApp(ctk.CTk):
             ctk.CTkLabel(left, text=f"  |  {self.agent_name}", font=ctk.CTkFont(size=14),
                         text_color=COLORS["success"]).pack(side="left", padx=(10, 0))
 
+        # Mini stats in header
+        stats = self.stats_manager.get_stats()
+        stats_frame = ctk.CTkFrame(left, fg_color=COLORS["bg_card"], corner_radius=8)
+        stats_frame.pack(side="left", padx=(20, 0))
+        ctk.CTkLabel(stats_frame, text=f"✓ {stats['successful_checks']}",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=COLORS["success"]).pack(side="left", padx=(10, 5), pady=5)
+        ctk.CTkLabel(stats_frame, text=f"✗ {stats['failed_checks']}",
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=COLORS["error"]).pack(side="left", padx=(5, 10), pady=5)
+
         right = ctk.CTkFrame(hf, fg_color="transparent")
         right.pack(side="right")
+
+        # Theme toggle button
+        theme_icon = "☀️" if self.is_dark_mode else "🌙"
+        self.theme_btn = ctk.CTkButton(right, text=theme_icon, width=35, height=35, corner_radius=8,
+                                       fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+                                       border_width=1, border_color=COLORS["border"],
+                                       font=ctk.CTkFont(size=16),
+                                       command=self.toggle_theme)
+        self.theme_btn.pack(side="left", padx=5)
+
         self.dashboard_btn = ctk.CTkButton(right, text="Dashboard", width=100, height=35, corner_radius=8,
-                                           fg_color=COLORS["accent"], hover_color=COLORS["accent_dark"],
+                                           fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"],
                                            text_color="#000", font=ctk.CTkFont(weight="bold"),
                                            command=self.show_dashboard)
         self.dashboard_btn.pack(side="left", padx=5)
@@ -446,7 +874,6 @@ class GeoApp(ctk.CTk):
         self.settings_btn.pack(side="left", padx=5)
 
     def create_dashboard(self):
-        # Status bar
         sf = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=16, height=70)
         sf.pack(fill="x", pady=(0, 15))
         sf.pack_propagate(False)
@@ -458,7 +885,6 @@ class GeoApp(ctk.CTk):
                                         text_color=COLORS["text"])
         self.status_text.pack(side="left")
 
-        # IP Section
         ip_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
         ip_sec.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(ip_sec, text="  IP LOCATION", font=ctk.CTkFont(size=12, weight="bold"),
@@ -476,7 +902,6 @@ class GeoApp(ctk.CTk):
         self.city_card = StatusCard(ip_grid, "CITY")
         self.city_card.grid(row=0, column=3, padx=4, pady=4, sticky="nsew")
 
-        # GPS Section
         gps_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
         gps_sec.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(gps_sec, text="  GPS COORDINATES", font=ctk.CTkFont(size=12, weight="bold"),
@@ -496,16 +921,14 @@ class GeoApp(ctk.CTk):
         self.coord_city_card = StatusCard(gps_grid, "CITY")
         self.coord_city_card.grid(row=0, column=4, padx=4, pady=4, sticky="nsew")
 
-        # Controls
         ctrl = ctk.CTkFrame(self.dashboard_frame, fg_color="transparent")
         ctrl.pack(fill="x", pady=(10, 0))
         self.run_btn = ctk.CTkButton(ctrl, text="▶  Run Check", width=150, height=45, corner_radius=12,
-                                      fg_color=COLORS["accent"], hover_color=COLORS["accent_dark"],
+                                      fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"],
                                       text_color="#000", font=ctk.CTkFont(size=14, weight="bold"),
                                       command=self.run_check)
         self.run_btn.pack(side="left")
 
-        # Auto-check section
         auto_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
         auto_sec.pack(fill="x", pady=(15, 0))
 
@@ -526,6 +949,52 @@ class GeoApp(ctk.CTk):
         self.countdown_label = ctk.CTkLabel(auto_sec, text="", font=ctk.CTkFont(size=11),
                                             text_color=COLORS["text_secondary"])
         self.countdown_label.pack(anchor="w", padx=12, pady=(0, 10))
+
+        # History section
+        history_sec = ctk.CTkFrame(self.dashboard_frame, fg_color=COLORS["bg_card"], corner_radius=12)
+        history_sec.pack(fill="x", pady=(10, 0))
+
+        history_header = ctk.CTkFrame(history_sec, fg_color="transparent")
+        history_header.pack(fill="x", padx=12, pady=(10, 5))
+        ctk.CTkLabel(history_header, text="📜 RECENT CHECKS", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=COLORS["accent"]).pack(side="left")
+
+        self.history_container = ctk.CTkFrame(history_sec, fg_color="transparent")
+        self.history_container.pack(fill="x", padx=12, pady=(0, 10))
+
+        self.update_history_display()
+
+    def update_history_display(self):
+        """Update the history display with recent checks"""
+        # Clear existing
+        for widget in self.history_container.winfo_children():
+            widget.destroy()
+
+        history = self.history_manager.get_history()
+
+        if not history:
+            ctk.CTkLabel(self.history_container, text="No checks yet",
+                        font=ctk.CTkFont(size=11),
+                        text_color=COLORS["text_secondary"]).pack(anchor="w", pady=5)
+            return
+
+        for entry in history:
+            row = ctk.CTkFrame(self.history_container, fg_color=COLORS["bg_card_hover"],
+                              corner_radius=6, height=30)
+            row.pack(fill="x", pady=2)
+            row.pack_propagate(False)
+
+            status_icon = "✓" if entry["status"] == "success" else "✗"
+            status_color = COLORS["success"] if entry["status"] == "success" else COLORS["error"]
+
+            ctk.CTkLabel(row, text=status_icon, font=ctk.CTkFont(size=14, weight="bold"),
+                        text_color=status_color, width=25).pack(side="left", padx=(10, 5))
+            ctk.CTkLabel(row, text=entry["timestamp"], font=ctk.CTkFont(size=11),
+                        text_color=COLORS["text_secondary"], width=60).pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(row, text=entry.get("location", "--"), font=ctk.CTkFont(size=11),
+                        text_color=COLORS["text"]).pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(row, text=entry.get("ip", "--"), font=ctk.CTkFont(size=11),
+                        text_color=COLORS["text_secondary"]).pack(side="right", padx=10)
 
     def toggle_auto_check(self):
         if self.auto_switch.get():
@@ -597,7 +1066,6 @@ class GeoApp(ctk.CTk):
         self.status_text.configure(text=msg)
 
     def update_cards(self):
-        # IP Location cards - green if IP allowed, red if IP not allowed
         ip_valid = self.current_data.get("ip_valid")
         if ip_valid is True:
             ip_color = COLORS["success"]
@@ -611,7 +1079,6 @@ class GeoApp(ctk.CTk):
         self.state_card.set_value(self.current_data["state"], ip_color)
         self.city_card.set_value(self.current_data["city"], ip_color)
 
-        # GPS cards - green if GPS allowed, red if GPS not allowed
         coord_valid = self.current_data.get("coord_valid")
         if coord_valid is True:
             gps_color = COLORS["success"]
@@ -630,6 +1097,11 @@ class GeoApp(ctk.CTk):
         if NOTIFICATIONS_AVAILABLE:
             try:
                 Notification(app_id="Location Service", title=title, msg=msg, duration="short").show()
+            except:
+                pass
+        if SOUND_AVAILABLE:
+            try:
+                winsound.MessageBeep()
             except:
                 pass
 
@@ -692,7 +1164,6 @@ class GeoApp(ctk.CTk):
         return {"Authorization": f"Basic {base64.b64encode(f'{u}:{p}'.encode()).decode()}"}
 
     def test_device_portal(self):
-        """Test Device Portal connection AND authentication"""
         try:
             r = requests.get(f"{self.base_uri}/api/os/info", headers=self.headers, timeout=5)
             if r.status_code == 401:
@@ -745,7 +1216,6 @@ class GeoApp(ctk.CTk):
         return None
 
     def activate_location_service(self):
-        """Activate location service via browser"""
         if not SELENIUM_AVAILABLE:
             return False
         try:
@@ -777,7 +1247,6 @@ class GeoApp(ctk.CTk):
                 self.browser_driver = None
 
     def initialize_location(self):
-        """Wake up location endpoints - CRITICAL for GPS injection to work"""
         for ep in [f"{self.base_uri}/ext/location",
                    f"{self.base_uri}/ext/location/override",
                    f"{self.base_uri}/ext/location/position"]:
@@ -788,7 +1257,6 @@ class GeoApp(ctk.CTk):
         time.sleep(1)
 
     def set_position(self, lat, lon):
-        """Set GPS position and return success status with error details"""
         try:
             r1 = requests.put(f"{self.base_uri}/ext/location/override",
                         headers={**self.headers, "Content-Type": "application/json"},
@@ -818,7 +1286,6 @@ class GeoApp(ctk.CTk):
             return False, str(e)
 
     def get_position(self):
-        """Get current GPS position from device"""
         try:
             r = requests.get(f"{self.base_uri}/ext/location/position", headers=self.headers, timeout=5)
             if r.status_code == 200:
@@ -846,8 +1313,6 @@ class GeoApp(ctk.CTk):
         return None
 
     def get_location_from_coordinates(self, lat, lon):
-        """Get location from coordinates - tries multiple APIs"""
-        # Try Nominatim first
         try:
             print(f"Trying Nominatim for {lat}, {lon}")
             d = requests.get(
@@ -866,7 +1331,6 @@ class GeoApp(ctk.CTk):
         except Exception as e:
             print(f"Nominatim error: {e}")
 
-        # Try BigDataCloud as backup
         try:
             print(f"Trying BigDataCloud for {lat}, {lon}")
             d = requests.get(
@@ -882,7 +1346,6 @@ class GeoApp(ctk.CTk):
         except Exception as e:
             print(f"BigDataCloud error: {e}")
 
-        # Try geocode.xyz as third option
         try:
             print(f"Trying geocode.xyz for {lat}, {lon}")
             d = requests.get(
@@ -902,18 +1365,15 @@ class GeoApp(ctk.CTk):
         return None
 
     def is_location_allowed(self, country, state):
-        """Check if location is allowed - with full country and state aliases"""
         if not country:
             return False, "country"
 
-        # Country aliases
         country_aliases = {
             "usa": ["united states", "us", "usa", "america", "united states of america", "u.s.", "u.s.a."],
             "uk": ["united kingdom", "uk", "great britain", "england", "gb", "britain"],
             "uae": ["united arab emirates", "uae", "emirates"],
         }
 
-        # US State aliases (abbreviation -> full name)
         state_aliases = {
             "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
             "ca": "california", "co": "colorado", "ct": "connecticut", "de": "delaware",
@@ -931,82 +1391,62 @@ class GeoApp(ctk.CTk):
             "pr": "puerto rico", "vi": "virgin islands", "gu": "guam"
         }
 
-        # Reverse state aliases (full name -> abbreviation)
         state_aliases_reverse = {v: k for k, v in state_aliases.items()}
 
         def normalize_country(c):
-            """Normalize country to standard form"""
             c_lower = c.lower().strip()
-            # Check if it matches any alias group
             for key, aliases in country_aliases.items():
                 if c_lower in aliases or any(c_lower in alias or alias in c_lower for alias in aliases):
                     return key
             return c_lower
 
         def normalize_state(s):
-            """Normalize state to full name"""
             if not s:
                 return ""
             s_lower = s.lower().strip()
-            # If it's an abbreviation, convert to full name
             if s_lower in state_aliases:
                 return state_aliases[s_lower]
-            # If it's already a full name, return as is
             if s_lower in state_aliases_reverse:
                 return s_lower
             return s_lower
 
         def matches_country(allowed, actual):
-            """Check if allowed country matches actual country"""
             allowed_norm = normalize_country(allowed)
             actual_norm = normalize_country(actual)
-
-            # Direct match after normalization
             if allowed_norm == actual_norm:
                 return True
-
-            # Check if one contains the other
             if allowed_norm in actual_norm or actual_norm in allowed_norm:
                 return True
-
             return False
 
         def matches_state(allowed, actual):
-            """Check if allowed state matches actual state"""
             if not actual:
                 return False
 
             allowed_norm = normalize_state(allowed)
             actual_norm = normalize_state(actual)
 
-            # Direct match after normalization
             if allowed_norm == actual_norm:
                 return True
 
-            # Check abbreviation match
             allowed_lower = allowed.lower().strip()
             actual_lower = actual.lower().strip()
 
-            # allowed is abbreviation, actual is full name
             if allowed_lower in state_aliases and state_aliases[allowed_lower] == actual_norm:
                 return True
 
-            # allowed is full name, actual is abbreviation
             if actual_lower in state_aliases and state_aliases[actual_lower] == allowed_norm:
                 return True
 
-            # Partial match
             if allowed_norm in actual_norm or actual_norm in allowed_norm:
                 return True
 
             return False
 
-        # Check country
         country_ok = any(matches_country(c, country) for c in self.allowed_countries)
         if not country_ok:
             return False, "country"
 
-        # Check state (if states are specified)
         if self.allowed_states:
             state_ok = any(matches_state(s, state) for s in self.allowed_states)
             if not state_ok:
@@ -1052,7 +1492,6 @@ class GeoApp(ctk.CTk):
         threading.Thread(target=self._run_check, args=(lat, lon), daemon=True).start()
 
     def _run_check(self, lat, lon):
-        """Run check with full verification"""
         errors = []
         ip_loc = None
         gps_loc = None
@@ -1064,9 +1503,13 @@ class GeoApp(ctk.CTk):
             self.update_cards()
             self.send_notification("Error", msg)
             self.supabase.log_check(ip, ip_loc, gps_loc, "error", msg)
+            # Record stats and history
+            self.stats_manager.record_check(False)
+            self.history_manager.add_entry("error", msg[:30], ip or "--")
+            self.update_history_display()
+            play_sound(success=False)
 
         try:
-            # Step 1: Test Device Portal connection
             self.update_status("running", "Connecting to Device Portal...")
             portal_ok, portal_error = self.test_device_portal()
 
@@ -1074,7 +1517,6 @@ class GeoApp(ctk.CTk):
                 if portal_error == "auth_failed":
                     finish_error("Device Portal: Bad username/password")
                     return
-                # Retry
                 time.sleep(2)
                 portal_ok, portal_error = self.test_device_portal()
                 if not portal_ok:
@@ -1084,15 +1526,12 @@ class GeoApp(ctk.CTk):
                         finish_error("Device Portal unavailable")
                     return
 
-            # Step 2: Activate location service
             self.update_status("running", "Activating location...")
             self.activate_location_service()
 
-            # Step 3: Initialize location endpoints (CRITICAL!)
             self.update_status("running", "Setting GPS coordinates...")
             self.initialize_location()
 
-            # Step 4: Set position with verification
             inject_success = False
             inject_error = ""
 
@@ -1117,7 +1556,6 @@ class GeoApp(ctk.CTk):
             self.current_data["lat"] = round(lat, 6)
             self.current_data["lon"] = round(lon, 6)
 
-            # Step 5: Verify GPS coordinates location
             self.update_status("running", "Verifying GPS coordinates...")
             gps_loc = self.get_location_from_coordinates(lat, lon)
 
@@ -1139,7 +1577,6 @@ class GeoApp(ctk.CTk):
                 self.current_data["coord_valid"] = False
                 print(f"WARNING: Could not get location from coordinates {lat}, {lon}")
 
-            # Step 6: Check public IP
             self.update_status("running", "Checking public IP...")
             ip = self.get_public_ip()
             if ip:
@@ -1163,19 +1600,29 @@ class GeoApp(ctk.CTk):
                 self.current_data["ip_valid"] = False
                 errors.append("Could not get public IP")
 
-            # Step 7: Final result
             self.supabase.log_check(ip, ip_loc, gps_loc, "error" if errors else "success", " | ".join(errors) or "OK")
 
             if errors:
                 self.current_data["status"] = "error"
                 self.update_status("error", errors[0][:60])
                 self.send_notification("Location Error", errors[0])
+                # Record stats and history
+                self.stats_manager.record_check(False)
+                location_str = f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}"
+                self.history_manager.add_entry("error", location_str, ip or "--")
+                play_sound(success=False)
             else:
                 self.current_data["status"] = "success"
                 self.update_status("success", "Ready to work!")
                 self.send_notification("Ready to work!", f"{self.current_data['city']}, {self.current_data['state']}")
+                # Record stats and history
+                self.stats_manager.record_check(True)
+                location_str = f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}"
+                self.history_manager.add_entry("success", location_str, ip or "--")
+                play_sound(success=True)
 
             self.update_cards()
+            self.update_history_display()
 
         except Exception as e:
             import traceback
@@ -1189,7 +1636,6 @@ class GeoApp(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(self.settings_frame, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
 
-        # License
         lic = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         lic.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(lic, text="License", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 5))
@@ -1199,7 +1645,6 @@ class GeoApp(ctk.CTk):
         ctk.CTkLabel(lic, text=f"Agent: {self.agent_name}", font=ctk.CTkFont(size=11),
                     text_color=COLORS["success"]).pack(anchor="w", padx=16, pady=(0, 12))
 
-        # Credentials
         cred = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         cred.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(cred, text="Device Portal", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 10))
@@ -1216,7 +1661,6 @@ class GeoApp(ctk.CTk):
         self.password_entry = ctk.CTkEntry(pf, show="*", height=32)
         self.password_entry.pack(side="left", fill="x", expand=True)
 
-        # GPS
         gps = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         gps.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(gps, text="GPS Coordinates", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 10))
@@ -1233,21 +1677,18 @@ class GeoApp(ctk.CTk):
         self.lon_entry = ctk.CTkEntry(lof, height=32)
         self.lon_entry.pack(side="left", fill="x", expand=True)
 
-        # Countries
         co = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         co.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(co, text="Allowed Countries", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 6))
         self.countries_entry = ctk.CTkTextbox(co, height=50, corner_radius=6, fg_color=COLORS["bg_dark"])
         self.countries_entry.pack(fill="x", padx=16, pady=(0, 12))
 
-        # States
         st = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         st.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(st, text="Allowed States", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 6))
         self.states_entry = ctk.CTkTextbox(st, height=50, corner_radius=6, fg_color=COLORS["bg_dark"])
         self.states_entry.pack(fill="x", padx=16, pady=(0, 12))
 
-        # Interval
         iv = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         iv.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(iv, text="Auto-Check Interval", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 10))
@@ -1258,9 +1699,8 @@ class GeoApp(ctk.CTk):
         self.interval_entry.pack(side="left")
         self.interval_entry.insert(0, "5")
 
-        # Save
         ctk.CTkButton(scroll, text="Save Settings", width=150, height=42, corner_radius=10,
-                     fg_color=COLORS["accent"], hover_color=COLORS["accent_dark"], text_color="#000",
+                     fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"], text_color="#000",
                      font=ctk.CTkFont(size=14, weight="bold"), command=self.save_config).pack(pady=15)
 
 
