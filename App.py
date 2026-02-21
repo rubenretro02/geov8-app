@@ -46,7 +46,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.45"
+APP_VERSION = "8.54"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -1746,7 +1746,7 @@ class GeoApp(ctk.CTk):
         ctk.CTkLabel(lic, text=f"ID: {masked_hwid}", font=ctk.CTkFont(size=11),
                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=16)
         ctk.CTkLabel(lic, text=f"Agent: {self.agent_name}", font=ctk.CTkFont(size=11),
-                    text_color=COLORS["success"]).pack(anchor="w", padx=16, pady=(0, 12))
+                    text_color="#FFFFFF").pack(anchor="w", padx=16, pady=(0, 12))
 
         cred = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         cred.pack(fill="x", pady=(0, 10))
