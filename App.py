@@ -1,11 +1,11 @@
 ###############################################
-# Geo V8.44 - Dashboard Application
+# Geo V8.56 - Dashboard Application
 # New features:
-# - Auto-update system
-# - Dark/Light mode toggle
-# - HWID protection fix
-# - Persistent license storage
-# - Simplified UI
+# - Fixed auto-update force_update behavior
+# - Auto-delete old exe files on update
+# - Auto-close app after update download starts
+# - Simplified update dialog (no What's New)
+# - Better exe cleanup across all locations
 ###############################################
 
 import customtkinter as ctk
@@ -46,7 +46,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.44"
+APP_VERSION = "9.1.5"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -99,6 +99,53 @@ LOCAL_CONFIG_PATH = SCRIPT_DIR / "config_local.json"
 STATS_PATH = SCRIPT_DIR / "stats.json"
 HISTORY_PATH = SCRIPT_DIR / "history.json"
 LICENSE_PATH = SCRIPT_DIR / "license_data.json"  # New: persistent license storage
+
+
+def get_startup_folder():
+    """Get the Windows Startup folder path"""
+    return os.path.join(
+        os.environ.get("APPDATA", ""),
+        "Microsoft", "Windows", "Start Menu", "Programs", "Startup"
+    )
+
+
+def is_in_startup_folder():
+    """Check if the current exe is running from the Startup folder"""
+    if not getattr(sys, 'frozen', False):
+        return False  # Running as script, not exe
+
+    current_exe = sys.executable.lower()
+    startup_folder = get_startup_folder().lower()
+
+    return startup_folder in current_exe or "startup" in current_exe
+
+
+def ensure_in_startup():
+    """
+    If app is not in Startup folder, copy it there (but don't restart).
+    App continues running from current location.
+    """
+    if not getattr(sys, 'frozen', False):
+        return True  # Running as script, skip
+
+    try:
+        current_exe = sys.executable
+        exe_name = os.path.basename(current_exe)
+        startup_folder = get_startup_folder()
+        startup_exe = os.path.join(startup_folder, exe_name)
+
+        # Check if exe already exists in Startup folder
+        if not os.path.exists(startup_exe):
+            # Copy exe to Startup folder (don't restart, just copy)
+            shutil.copy2(current_exe, startup_exe)
+            print(f"Copied to Startup: {startup_exe}")
+        else:
+            print(f"Already in Startup: {startup_exe}")
+
+    except Exception as e:
+        print(f"Could not copy to Startup folder: {e}")
+
+    return True  # Always continue with current instance
 
 
 class AutoUpdater:
@@ -160,7 +207,7 @@ class AutoUpdater:
             return 0
 
     def download_and_install(self, download_url, progress_callback=None):
-        """Download new version and install it"""
+        """Download new version and install it to Startup folder"""
         try:
             if not download_url:
                 return False, "No download URL"
@@ -199,57 +246,96 @@ class AutoUpdater:
                 return False, f"Downloaded file too small ({actual_size} bytes)"
 
             if progress_callback:
-                progress_callback("Installing update...")
+                progress_callback("Preparing installation...")
 
-            # Get current executable path
+            # Get current exe path (already in Startup folder thanks to ensure_in_startup)
             if getattr(sys, 'frozen', False):
                 current_exe = sys.executable
             else:
-                # Running as script - can't auto-update
                 return False, "Cannot auto-update when running as script"
 
-            # Create batch script to replace exe after app closes
-            # Uses retry logic and longer wait time
+            exe_dir = os.path.dirname(current_exe)
+            exe_name = os.path.basename(current_exe)
+
+            # Save new exe with temp name in same folder (Startup)
+            temp_new_name = exe_name.replace(".exe", ".updating.exe")
+            temp_new_path = os.path.join(exe_dir, temp_new_name)
+
+            # Copy new exe with temp name
+            if progress_callback:
+                progress_callback("Saving new version...")
+            shutil.copy2(temp_file, temp_new_path)
+
+            # Verify the new file exists and has good size
+            if not os.path.exists(temp_new_path) or os.path.getsize(temp_new_path) < 100000:
+                return False, "Failed to save new version"
+
+            if progress_callback:
+                progress_callback("Installing update...")
+
+            # Create batch script that will:
+            # 1. Wait for app to close
+            # 2. Delete old exe in Startup folder
+            # 3. Rename new exe to original name
+            # 4. Open the app
             batch_script = os.path.join(temp_dir, "update.bat")
             with open(batch_script, 'w') as f:
                 f.write(f'''@echo off
-echo Updating GeoV8...
-echo Waiting for app to close...
+echo ========================================
+echo Installing GeoV8 Update...
+echo ========================================
 
-REM Wait longer for app to fully close
+REM Wait for app to close
+echo Waiting for app to close...
 timeout /t 5 /nobreak >nul
 
-REM Try to delete old exe with retries
-set retries=10
+REM Clean PyInstaller temp folders
+for /d %%i in ("%TEMP%\\_MEI*") do rd /s /q "%%i" 2>nul
+
+REM Delete old exe with retries
+echo Removing old version...
+set retries=20
 :retry_delete
+if not exist "{current_exe}" goto :do_rename
 del /f /q "{current_exe}" 2>nul
 if exist "{current_exe}" (
     set /a retries-=1
     if %retries% gtr 0 (
-        echo Waiting for file to be released...
-        timeout /t 2 /nobreak >nul
+        timeout /t 1 /nobreak >nul
         goto retry_delete
     ) else (
-        echo ERROR: Could not delete old file
+        echo ERROR: Could not remove old version.
+        echo The new version is saved as: {temp_new_name}
+        echo Location: {exe_dir}
         pause
         exit /b 1
     )
 )
 
-REM Move new exe
-move /y "{temp_file}" "{current_exe}"
+:do_rename
+REM Rename new exe to original name
+echo Installing new version...
+rename "{temp_new_path}" "{exe_name}"
 if errorlevel 1 (
-    echo ERROR: Could not move new file
+    echo ERROR: Could not rename new version.
+    echo The new version is saved as: {temp_new_name}
+    echo Location: {exe_dir}
     pause
     exit /b 1
 )
 
+REM Clean temp folders again before starting
+for /d %%i in ("%TEMP%\\_MEI*") do rd /s /q "%%i" 2>nul
+timeout /t 2 /nobreak >nul
+
+echo ========================================
 echo Update complete! Starting app...
-timeout /t 1 /nobreak >nul
+echo ========================================
 start "" "{current_exe}"
 
 REM Cleanup
 rmdir /s /q "{temp_dir}" 2>nul
+exit
 ''')
 
             # Run batch script and exit
@@ -703,53 +789,43 @@ class UpdateDialog(ctk.CTkToplevel):
     def __init__(self, parent, update_info, auto_updater):
         super().__init__(parent)
         self.title("Update Available")
-        self.geometry("450x300")
+        self.geometry("400x180")
         self.configure(fg_color=COLORS["bg_dark"])
         self.resizable(False, False)
         self.parent = parent
         self.update_info = update_info
         self.auto_updater = auto_updater
-        self.updating = False
-        self.can_close = True  # Allow closing by default
+        self.force_update = update_info.get("force_update", False)
+        self.updating = False  # Track if user clicked update
+        self.user_skipped = False  # Track if user skipped/closed
 
         self.update_idletasks()
-        x = (self.winfo_screenwidth() - 450) // 2
-        y = (self.winfo_screenheight() - 300) // 2
-        self.geometry(f"450x300+{x}+{y}")
+        x = (self.winfo_screenwidth() - 400) // 2
+        y = (self.winfo_screenheight() - 180) // 2
+        self.geometry(f"400x180+{x}+{y}")
         self.transient(parent)
         self.grab_set()
 
-        # Always allow closing with X (user can force close)
+        # Handle close button based on force_update
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # Header
-        ctk.CTkLabel(self, text="🚀 New Version Available!",
+        # Header - Simple, no "What's New"
+        ctk.CTkLabel(self, text="Update Available",
                     font=ctk.CTkFont(size=20, weight="bold"),
                     text_color=COLORS["accent"]).pack(pady=(25, 10))
 
-        ctk.CTkLabel(self, text=f"Version {update_info.get('version', '?')} is ready",
+        ctk.CTkLabel(self, text=f"Version {update_info.get('version', '?')} is ready to download",
                     font=ctk.CTkFont(size=14),
-                    text_color=COLORS["text"]).pack(pady=(0, 15))
+                    text_color=COLORS["text"]).pack(pady=(0, 5))
 
-        # Release notes
-        notes = update_info.get("release_notes", "Bug fixes and improvements")
-        notes_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=10)
-        notes_frame.pack(fill="x", padx=30, pady=10)
-        ctk.CTkLabel(notes_frame, text="What's new:",
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=COLORS["text_secondary"]).pack(anchor="w", padx=15, pady=(10, 5))
-        ctk.CTkLabel(notes_frame, text=notes,
-                    font=ctk.CTkFont(size=12),
-                    text_color=COLORS["text"], wraplength=380).pack(anchor="w", padx=15, pady=(0, 10))
-
-        # Progress label
+        # Progress/status label
         self.progress_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=11),
                                            text_color=COLORS["warning"])
-        self.progress_label.pack(pady=(10, 5))
+        self.progress_label.pack(pady=(0, 10))
 
         # Buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(pady=15)
+        btn_frame.pack(pady=10)
 
         self.update_btn = ctk.CTkButton(btn_frame, text="Update Now", width=140, height=40,
                                         fg_color=COLORS["accent"],
@@ -758,7 +834,8 @@ class UpdateDialog(ctk.CTkToplevel):
                                         command=self.start_update)
         self.update_btn.pack(side="left", padx=5)
 
-        if not update_info.get("force_update"):
+        # Only show Skip button if force_update is False
+        if not self.force_update:
             self.skip_btn = ctk.CTkButton(btn_frame, text="Skip", width=100, height=40,
                                           fg_color=COLORS["bg_card"],
                                           hover_color=COLORS["bg_card_hover"],
@@ -771,55 +848,327 @@ class UpdateDialog(ctk.CTkToplevel):
                         text_color=COLORS["error"]).pack()
 
     def start_update(self):
-        self.updating = True
-        self.can_close = False  # Prevent accidental close during download
-        self.update_btn.configure(state="disabled", text="Updating...")
-        if hasattr(self, 'skip_btn'):
-            self.skip_btn.configure(state="disabled")
+        """Show instructions dialog before downloading"""
+        download_url = self.update_info.get("download_url")
+        if not download_url:
+            self.progress_label.configure(text="No download URL available", text_color=COLORS["error"])
+            return
 
-        def do_update():
-            success, message = self.auto_updater.download_and_install(
-                self.update_info.get("download_url"),
-                progress_callback=lambda msg: self.after(0, lambda: self.progress_label.configure(text=msg))
+        # Show instructions dialog
+        self.show_instructions_dialog(download_url)
+
+    def show_instructions_dialog(self, download_url):
+        """Show instructions before starting download"""
+        self.instructions_window = ctk.CTkToplevel(self)
+        self.instructions_window.title("Update")
+        self.instructions_window.geometry("420x340")
+        self.instructions_window.configure(fg_color=COLORS["bg_dark"])
+        self.instructions_window.resizable(False, False)
+        self.instructions_window.overrideredirect(True)  # Remove title bar for cleaner look
+
+        # Center the window
+        self.instructions_window.update_idletasks()
+        x = (self.instructions_window.winfo_screenwidth() - 420) // 2
+        y = (self.instructions_window.winfo_screenheight() - 340) // 2
+        self.instructions_window.geometry(f"420x340+{x}+{y}")
+        self.instructions_window.transient(self)
+        self.instructions_window.grab_set()
+
+        # Main container with border
+        main_frame = ctk.CTkFrame(self.instructions_window, fg_color=COLORS["bg_card"],
+                                   corner_radius=12, border_width=1, border_color=COLORS["border"])
+        main_frame.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # Header
+        ctk.CTkLabel(main_frame, text="Before You Continue",
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                    text_color=COLORS["text"]).pack(pady=(25, 18))
+
+        # Instructions container
+        instructions_frame = ctk.CTkFrame(main_frame, fg_color=COLORS["bg_dark"], corner_radius=8)
+        instructions_frame.pack(fill="x", padx=25, pady=(0, 18))
+
+        # Step 1
+        step1 = ctk.CTkFrame(instructions_frame, fg_color="transparent")
+        step1.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(step1, text="1.", font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=COLORS["accent"], width=18).pack(side="left")
+        ctk.CTkLabel(step1, text="Click the downloaded .exe to install",
+                    font=ctk.CTkFont(size=11), text_color=COLORS["text"]).pack(side="left", padx=4)
+
+        # Step 2
+        step2 = ctk.CTkFrame(instructions_frame, fg_color="transparent")
+        step2.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(step2, text="2.", font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=COLORS["accent"], width=18).pack(side="left")
+        ctk.CTkLabel(step2, text='Browser warning? Click "Keep"',
+                    font=ctk.CTkFont(size=11), text_color=COLORS["text"]).pack(side="left", padx=4)
+
+        # Step 3
+        step3 = ctk.CTkFrame(instructions_frame, fg_color="transparent")
+        step3.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(step3, text="3.", font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=COLORS["accent"], width=18).pack(side="left")
+        ctk.CTkLabel(step3, text="Double-click the .exe file",
+                    font=ctk.CTkFont(size=11), text_color=COLORS["text"]).pack(side="left", padx=4)
+
+        # Step 4
+        step4 = ctk.CTkFrame(instructions_frame, fg_color="transparent")
+        step4.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(step4, text="4.", font=ctk.CTkFont(size=11, weight="bold"),
+                    text_color=COLORS["accent"], width=18).pack(side="left")
+        ctk.CTkLabel(step4, text='"Windows protected your PC" → Click "More info" → "Run anyway"',
+                    font=ctk.CTkFont(size=10), text_color=COLORS["text"]).pack(side="left", padx=4)
+
+        # Checkbox
+        self.accept_var = ctk.BooleanVar(value=False)
+        self.accept_checkbox = ctk.CTkCheckBox(
+            main_frame,
+            text="I understand",
+            font=ctk.CTkFont(size=11),
+            variable=self.accept_var,
+            command=lambda: self.toggle_ok_button(),
+            checkbox_width=16,
+            checkbox_height=16,
+            corner_radius=4,
+            border_width=2,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_gradient_end"]
+        )
+        self.accept_checkbox.pack(pady=(0, 15))
+
+        # Buttons frame
+        btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        btn_frame.pack(pady=(0, 20))
+
+        # Download button (disabled until checkbox is checked)
+        self.ok_btn = ctk.CTkButton(
+            btn_frame, text="Download", width=110, height=34,
+            fg_color=COLORS["text_secondary"],
+            hover_color=COLORS["text_secondary"],
+            text_color=COLORS["bg_dark"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            corner_radius=8,
+            state="disabled",
+            command=lambda: self.execute_update(download_url)
+        )
+        self.ok_btn.pack(side="left", padx=6)
+
+        # Cancel button
+        ctk.CTkButton(
+            btn_frame, text="Cancel", width=90, height=34,
+            fg_color="transparent",
+            hover_color=COLORS["bg_card_hover"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
+            font=ctk.CTkFont(size=12),
+            corner_radius=8,
+            command=lambda: self.cancel_instructions()
+        ).pack(side="left", padx=6)
+
+    def toggle_ok_button(self):
+        """Enable/disable OK button based on checkbox"""
+        if self.accept_var.get():
+            self.ok_btn.configure(
+                state="normal",
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_gradient_end"]
             )
-            if success:
-                self.after(0, lambda: self.progress_label.configure(text="Closing app...", text_color=COLORS["success"]))
-                # Force close the app completely
-                self.after(500, self.force_exit)
-            else:
-                self.can_close = True  # Allow closing again on failure
-                self.after(0, lambda: self.update_failed(message))
+        else:
+            self.ok_btn.configure(
+                state="disabled",
+                fg_color=COLORS["text_secondary"],
+                hover_color=COLORS["text_secondary"]
+            )
 
-        threading.Thread(target=do_update, daemon=True).start()
+    def cancel_instructions(self):
+        """Cancel the instructions dialog"""
+        self.instructions_window.destroy()
+
+    def execute_update(self, download_url):
+        """Execute the actual update after accepting instructions"""
+        self.updating = True
+
+        # Close instructions dialog
+        self.instructions_window.destroy()
+
+        # Update main dialog
+        self.update_btn.configure(state="disabled", text="Downloading...")
+        self.progress_label.configure(text="Cleaning up old versions...", text_color=COLORS["warning"])
+        self.update_idletasks()
+
+        # Delete exe from all known locations BEFORE opening browser
+        deleted_count = self.delete_old_versions()
+
+        # Create cleanup script to delete current exe after app closes
+        self.create_cleanup_script()
+
+        self.progress_label.configure(text=f"Deleted {deleted_count} old files. Opening browser...", text_color=COLORS["warning"])
+        self.update_idletasks()
+
+        # Open download URL in browser - Chrome first, then Edge
+        self.open_browser(download_url)
+
+        # Wait a moment then close the app
+        self.progress_label.configure(
+            text="Download started. App will close in 5 seconds...",
+            text_color=COLORS["success"]
+        )
+        self.update_idletasks()
+
+        # Close app after 5 seconds to let user see the message
+        self.after(5000, self.force_exit)
+
+    def create_cleanup_script(self):
+        """Create a batch script to delete the current exe after app closes"""
+        if not getattr(sys, 'frozen', False):
+            return  # Running as script, skip
+
+        try:
+            current_exe = sys.executable
+
+            # Create batch script in temp folder
+            batch_content = f'''@echo off
+ping 127.0.0.1 -n 6 > nul
+del /f /q "{current_exe}" 2>nul
+del /f /q "%~f0" 2>nul
+'''
+
+            batch_path = os.path.join(tempfile.gettempdir(), "geo_cleanup.bat")
+            with open(batch_path, 'w') as f:
+                f.write(batch_content)
+
+            # Run the batch script hidden
+            subprocess.Popen(
+                batch_path,
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            print(f"Cleanup script created: {batch_path}")
+        except Exception as e:
+            print(f"Could not create cleanup script: {e}")
+
+    def delete_old_versions(self):
+        """Delete exe files from all known locations (except current running exe)"""
+        deleted_count = 0
+
+        if not getattr(sys, 'frozen', False):
+            return 0  # Running as script, skip
+
+        current_exe = sys.executable
+        current_exe_lower = current_exe.lower()
+        exe_name = os.path.basename(current_exe)  # Get current exe name (App.exe, etc.)
+        exe_base = os.path.splitext(exe_name)[0].lower()  # "app" without .exe
+
+        # Locations to check and delete
+        locations = [
+            get_startup_folder(),
+            os.path.join(os.environ.get("USERPROFILE", ""), "Downloads"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "Documents"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
+            os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Startup"),
+        ]
+
+        for location in locations:
+            if not location or not os.path.exists(location):
+                continue
+            try:
+                # Search ALL .exe files in this folder
+                for filename in os.listdir(location):
+                    if not filename.lower().endswith('.exe'):
+                        continue
+
+                    filename_lower = filename.lower()
+                    filename_base = os.path.splitext(filename_lower)[0]
+
+                    # Match: exact name, or name with numbers like "app (1)", "app (2)", etc.
+                    should_delete = (
+                        filename_lower == exe_name.lower() or  # Exact match
+                        filename_base == exe_base or  # Same base name
+                        filename_base.startswith(exe_base + " (") or  # "app (1)", "app (2)"
+                        filename_base.startswith(exe_base + "(")  # "app(1)" without space
+                    )
+
+                    if should_delete:
+                        file_path = os.path.join(location, filename)
+                        # Don't delete the currently running exe
+                        if file_path.lower() == current_exe_lower:
+                            continue
+                        try:
+                            os.remove(file_path)
+                            print(f"Deleted: {file_path}")
+                            deleted_count += 1
+                        except Exception as e:
+                            print(f"Could not delete {file_path}: {e}")
+            except Exception as e:
+                print(f"Error in {location}: {e}")
+
+        return deleted_count
+
+    def open_browser(self, url):
+        """Open URL in Chrome first, if not available use Edge"""
+        import webbrowser
+
+        # Try Chrome first
+        chrome_paths = [
+            "C:/Program Files/Google/Chrome/Application/chrome.exe",
+            "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google/Chrome/Application/chrome.exe"),
+        ]
+
+        for chrome_path in chrome_paths:
+            if os.path.exists(chrome_path):
+                try:
+                    subprocess.Popen([chrome_path, url])
+                    print(f"Opened with Chrome: {chrome_path}")
+                    return
+                except:
+                    continue
+
+        # Try Edge if Chrome not found
+        edge_paths = [
+            "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+            "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+        ]
+
+        for edge_path in edge_paths:
+            if os.path.exists(edge_path):
+                try:
+                    subprocess.Popen([edge_path, url])
+                    print(f"Opened with Edge: {edge_path}")
+                    return
+                except:
+                    continue
+
+        # Fallback to default browser
+        webbrowser.open(url)
+        print("Opened with default browser")
 
     def force_exit(self):
-        """Force close the application for update"""
+        """Force close the application"""
         try:
             self.parent.destroy()
         except:
             pass
-        # Force exit - this will definitely close the app
         os._exit(0)
 
     def on_close(self):
         """Handle window close button"""
-        if self.updating and not self.can_close:
-            # If actively downloading, ask for confirmation
-            return
-        self.updating = False
-        self.destroy()
-
-    def update_failed(self, message):
-        self.updating = False
-        self.progress_label.configure(text=f"Update failed: {message}", text_color=COLORS["error"])
-        self.update_btn.configure(state="normal", text="Retry")
-        if hasattr(self, 'skip_btn'):
-            self.skip_btn.configure(state="normal")
+        if self.force_update:
+            # If force_update is True, close the entire app
+            self.force_exit()
+        else:
+            # Otherwise just mark as skipped and close the dialog
+            self.user_skipped = True
+            self.destroy()
 
     def skip_update(self):
-        self.updating = False
-        self.can_close = True
-        self.destroy()
+        """Skip the update (only if not force_update)"""
+        if self.force_update:
+            self.force_exit()
+        else:
+            self.user_skipped = True
+            self.destroy()
 
 
 class GeoApp(ctk.CTk):
@@ -844,6 +1193,7 @@ class GeoApp(ctk.CTk):
         self.history_manager = HistoryManager()
         self.auto_check_job = None
         self.countdown_job = None
+        self.updating = False  # Track update state
 
         # Check for updates first
         self.after(100, self.check_for_updates)
@@ -898,6 +1248,8 @@ class GeoApp(ctk.CTk):
     def show_update_dialog(self, update_info):
         dialog = UpdateDialog(self, update_info, self.auto_updater)
         self.wait_window(dialog)
+        # If force_update was true and user closed, the app would already be closed
+        # If user skipped or closed normally, continue to license check
         if not dialog.updating:
             self.check_license()
 
@@ -1746,7 +2098,7 @@ class GeoApp(ctk.CTk):
         masked_hwid = "****" + self.supabase.hwid[-6:]
         ctk.CTkLabel(lic, text=f"ID: {masked_hwid}", font=ctk.CTkFont(size=11),
                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=16)
-        ctk.CTkLabel(lic, text=f"Agent: {self.agent_name}", font=ctk.CTkFont(size=11),
+        ctk.CTkLabel(lic, text=f"Agent: {self.agent_name}", font=ctk.CTkFont(size=18, weight="bold"),
                     text_color=COLORS["success"]).pack(anchor="w", padx=16, pady=(0, 12))
 
         cred = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
@@ -1809,5 +2161,8 @@ class GeoApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    # Ensure app is running from Startup folder
+    ensure_in_startup()
+
     app = GeoApp()
     app.mainloop()
