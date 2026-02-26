@@ -1,11 +1,13 @@
 ###############################################
-# Geo V8.44 - Dashboard Application
+# Geo V9.2.1.2 - Dashboard Application
 # New features:
 # - Auto-update system
 # - Dark/Light mode toggle
 # - HWID protection fix
-# - Persistent license storage
+# - Persistent license storage (FIXED)
 # - Simplified UI
+# - AppData storage for better persistence
+# - AUTO-START: App adds itself to Windows Startup
 ###############################################
 
 import customtkinter as ctk
@@ -25,6 +27,7 @@ from datetime import datetime
 import subprocess
 import tempfile
 import shutil
+import winreg  # For Windows Registry startup
 
 try:
     from winotify import Notification, audio
@@ -46,7 +49,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "8.44"
+APP_VERSION = "9.2.1.2"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -94,11 +97,212 @@ COLORS_LIGHT = {
 # Start with dark mode
 COLORS = COLORS_DARK.copy()
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-LOCAL_CONFIG_PATH = SCRIPT_DIR / "config_local.json"
-STATS_PATH = SCRIPT_DIR / "stats.json"
-HISTORY_PATH = SCRIPT_DIR / "history.json"
-LICENSE_PATH = SCRIPT_DIR / "license_data.json"  # New: persistent license storage
+# Determinar directorio de datos persistente
+# Usar %APPDATA%/Geo para garantizar permisos de escritura y persistencia
+if getattr(sys, 'frozen', False):
+    # Compilado como .exe - usar AppData para datos persistentes
+    APP_DATA_DIR = Path(os.environ.get('APPDATA', os.path.expanduser('~'))) / "GeoV8"
+    SCRIPT_DIR = Path(sys.executable).parent.resolve()  # Para recursos/iconos
+else:
+    # Corriendo como script Python - usar directorio del script
+    APP_DATA_DIR = Path(__file__).parent.resolve()
+    SCRIPT_DIR = APP_DATA_DIR
+
+# Crear directorio de datos si no existe
+try:
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+except:
+    APP_DATA_DIR = SCRIPT_DIR  # Fallback al directorio del ejecutable
+
+# Archivos de configuración y datos en AppData (persistentes)
+LOCAL_CONFIG_PATH = APP_DATA_DIR / "config_local.json"
+STATS_PATH = APP_DATA_DIR / "stats.json"
+HISTORY_PATH = APP_DATA_DIR / "history.json"
+LICENSE_PATH = APP_DATA_DIR / "license_data.json"  # Persistent license storage
+FIRST_RUN_PATH = APP_DATA_DIR / "first_run.json"  # Track first run for auto-start
+
+
+def get_startup_folder():
+    """Get the Windows Startup folder path"""
+    try:
+        return Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    except:
+        return None
+
+
+def is_app_in_startup():
+    """Check if app is already in Windows Startup folder or registry"""
+    try:
+        # Method 1: Check Startup folder for shortcut or exe
+        startup_folder = get_startup_folder()
+        if startup_folder and startup_folder.exists():
+            # Check for any GeoV8 related files
+            for item in startup_folder.iterdir():
+                if "geo" in item.name.lower() or "geov" in item.name.lower():
+                    return True
+
+        # Method 2: Check Windows Registry
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_READ
+            )
+            try:
+                winreg.QueryValueEx(key, "GeoV8")
+                winreg.CloseKey(key)
+                return True
+            except WindowsError:
+                winreg.CloseKey(key)
+        except:
+            pass
+
+        return False
+    except:
+        return False
+
+
+def add_to_startup():
+    """Add the application to Windows Startup"""
+    try:
+        if getattr(sys, 'frozen', False):
+            # Running as compiled exe
+            app_path = sys.executable
+        else:
+            # Running as Python script - don't add to startup
+            print("Running as script - skipping startup registration")
+            return False, "Cannot add to startup when running as script"
+
+        # Method 1: Add to Windows Registry (preferred, more reliable)
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE
+            )
+            winreg.SetValueEx(key, "GeoV8", 0, winreg.REG_SZ, f'"{app_path}"')
+            winreg.CloseKey(key)
+            print(f"Added to startup via Registry: {app_path}")
+            return True, "Added to startup via Registry"
+        except Exception as e:
+            print(f"Registry method failed: {e}")
+
+        # Method 2: Copy to Startup folder (fallback)
+        try:
+            startup_folder = get_startup_folder()
+            if startup_folder and startup_folder.exists():
+                # Create a shortcut or copy the exe
+                dest_path = startup_folder / Path(app_path).name
+
+                # If source and destination are different, copy
+                if Path(app_path).resolve() != dest_path.resolve():
+                    shutil.copy2(app_path, dest_path)
+                    print(f"Copied to startup folder: {dest_path}")
+                    return True, "Copied to startup folder"
+                else:
+                    print("App already in startup folder")
+                    return True, "Already in startup folder"
+        except Exception as e:
+            print(f"Startup folder method failed: {e}")
+
+        return False, "Failed to add to startup"
+    except Exception as e:
+        print(f"add_to_startup error: {e}")
+        return False, str(e)
+
+
+def is_first_run():
+    """Check if this is the first time the app is running"""
+    try:
+        if FIRST_RUN_PATH.exists():
+            with open(FIRST_RUN_PATH, 'r') as f:
+                data = json.load(f)
+                return not data.get("startup_configured", False)
+        return True
+    except:
+        return True
+
+
+def mark_startup_configured():
+    """Mark that startup has been configured"""
+    try:
+        data = {}
+        if FIRST_RUN_PATH.exists():
+            try:
+                with open(FIRST_RUN_PATH, 'r') as f:
+                    data = json.load(f)
+            except:
+                pass
+
+        data["startup_configured"] = True
+        data["configured_at"] = datetime.now().isoformat()
+        data["app_version"] = APP_VERSION
+
+        with open(FIRST_RUN_PATH, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error marking startup configured: {e}")
+
+
+def check_and_setup_startup():
+    """Check if app should be added to startup and do it"""
+    try:
+        # Only run for compiled exe
+        if not getattr(sys, 'frozen', False):
+            print("Running as script - skipping startup check")
+            return
+
+        # Check if first run or if not in startup
+        first_run = is_first_run()
+        in_startup = is_app_in_startup()
+
+        print(f"First run: {first_run}, In startup: {in_startup}")
+
+        if first_run or not in_startup:
+            print("Adding app to Windows Startup...")
+            success, message = add_to_startup()
+
+            if success:
+                mark_startup_configured()
+                print(f"Startup setup complete: {message}")
+            else:
+                print(f"Startup setup failed: {message}")
+    except Exception as e:
+        print(f"check_and_setup_startup error: {e}")
+
+
+def ensure_in_startup():
+    """
+    If app is not in Startup folder, copy it there (but don't restart).
+    App continues running from current location.
+    This function copies the exe directly to the Startup folder.
+    """
+    if not getattr(sys, 'frozen', False):
+        return True  # Running as script, skip
+
+    try:
+        current_exe = sys.executable
+        exe_name = os.path.basename(current_exe)
+        startup_folder = get_startup_folder()
+
+        if startup_folder is None:
+            print("Could not get Startup folder path")
+            return True
+
+        startup_exe = startup_folder / exe_name
+
+        # Check if exe already exists in Startup folder
+        if not startup_exe.exists():
+            # Copy exe to Startup folder (don't restart, just copy)
+            shutil.copy2(current_exe, str(startup_exe))
+            print(f"Copied to Startup: {startup_exe}")
+        else:
+            print(f"Already in Startup: {startup_exe}")
+
+    except Exception as e:
+        print(f"Could not copy to Startup folder: {e}")
+
+    return True  # Always continue with current instance
 
 
 class AutoUpdater:
@@ -919,6 +1123,9 @@ class GeoApp(ctk.CTk):
             self.initialize_app()
 
     def initialize_app(self):
+        # Check and setup auto-startup on Windows
+        self.after(100, check_and_setup_startup)
+
         self.port = 50080
         self.base_uri = f"http://localhost:{self.port}"
         self.headers = {}
@@ -1809,5 +2016,8 @@ class GeoApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    # Ensure app is copied to Startup folder (from App1.py)
+    ensure_in_startup()
+
     app = GeoApp()
     app.mainloop()
