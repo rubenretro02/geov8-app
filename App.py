@@ -1,5 +1,5 @@
 ###############################################
-# Geo V9.2.1.2 - Dashboard Application
+# Geo V9.2.1.3 - Dashboard Application
 # New features:
 # - Auto-update system
 # - Dark/Light mode toggle
@@ -49,7 +49,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.2.1.2"
+APP_VERSION = "9.2.1.3"
 
 # Supabase Config
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
@@ -149,7 +149,7 @@ def is_app_in_startup():
                 0, winreg.KEY_READ
             )
             try:
-                winreg.QueryValueEx(key, "GeoV8")
+                winreg.QueryValueEx(key, "GeoApp")
                 winreg.CloseKey(key)
                 return True
             except WindowsError:
@@ -180,7 +180,7 @@ def add_to_startup():
                 r"Software\Microsoft\Windows\CurrentVersion\Run",
                 0, winreg.KEY_SET_VALUE
             )
-            winreg.SetValueEx(key, "GeoV8", 0, winreg.REG_SZ, f'"{app_path}"')
+            winreg.SetValueEx(key, "GeoApp", 0, winreg.REG_SZ, f'"{app_path}"')
             winreg.CloseKey(key)
             print(f"Added to startup via Registry: {app_path}")
             return True, "Added to startup via Registry"
@@ -305,6 +305,210 @@ def ensure_in_startup():
     return True  # Always continue with current instance
 
 
+def get_common_user_folders():
+    """Get all common user folders where the app might be located"""
+    folders = []
+    try:
+        # Get user home directory
+        home = Path.home()
+
+        # Common folders where users might put executables
+        common_paths = [
+            # Startup folder
+            Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup",
+            # Desktop
+            home / "Desktop",
+            # Downloads
+            home / "Downloads",
+            # Documents
+            home / "Documents",
+            # AppData Local
+            Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local")),
+            # AppData Roaming
+            Path(os.environ.get("APPDATA", home / "AppData" / "Roaming")),
+            # Program Files (user installable)
+            home / "AppData" / "Local" / "Programs",
+            # Root of user folder
+            home,
+            # OneDrive Desktop/Downloads/Documents if exists
+            home / "OneDrive" / "Desktop",
+            home / "OneDrive" / "Downloads",
+            home / "OneDrive" / "Documents",
+        ]
+
+        for p in common_paths:
+            if p and p.exists() and p.is_dir():
+                folders.append(p)
+
+    except Exception as e:
+        print(f"Error getting common folders: {e}")
+
+    return folders
+
+
+def is_geo_app_executable(file_path):
+    """
+    Check if a file is likely a GeoV8/Geo app executable.
+    Uses multiple heuristics to identify the app even if renamed.
+    """
+    try:
+        file_path = Path(file_path)
+
+        # Must be an exe file
+        if file_path.suffix.lower() != '.exe':
+            return False
+
+        # Skip if it's the current running executable
+        if getattr(sys, 'frozen', False):
+            current_exe = Path(sys.executable).resolve()
+            if file_path.resolve() == current_exe:
+                return False
+
+        # Check file size - GeoV8 exe should be between 10MB and 100MB typically
+        file_size = file_path.stat().st_size
+        if file_size < 5 * 1024 * 1024 or file_size > 150 * 1024 * 1024:  # 5MB to 150MB
+            return False
+
+        # Check 1: Name contains geo-related keywords (case insensitive)
+        name_lower = file_path.stem.lower()
+        geo_keywords = ['geo', 'geov', 'geo_v', 'geo-v', 'geov8', 'geov9', 'geoapp', 'geo_app', 'geo-app']
+        name_match = any(kw in name_lower for kw in geo_keywords)
+
+        # Check 2: Read first few bytes to check for PyInstaller signature
+        # PyInstaller executables have specific patterns
+        is_pyinstaller = False
+        try:
+            with open(file_path, 'rb') as f:
+                # Read first 2 bytes for MZ header (PE executable)
+                header = f.read(2)
+                if header == b'MZ':
+                    # Read more to look for PyInstaller markers
+                    f.seek(0)
+                    content = f.read(min(file_size, 1024 * 100))  # Read first 100KB
+
+                    # Look for common PyInstaller strings
+                    pyinstaller_markers = [
+                        b'pyi-runtime-tmpdir',
+                        b'_MEIPASS',
+                        b'PyInstaller',
+                        b'_pyi_',
+                    ]
+
+                    for marker in pyinstaller_markers:
+                        if marker in content:
+                            is_pyinstaller = True
+                            break
+
+                    # Also look for specific app strings
+                    app_markers = [
+                        b'GeoV',
+                        b'geov',
+                        b'Geo V',
+                        b'SUPABASE',
+                        b'krejyqdlujpemrpeqozc.supabase.co',  # Our specific supabase URL
+                        b'check_and_setup_startup',
+                        b'AutoUpdater',
+                        b'SupabaseManager',
+                    ]
+
+                    app_match = any(marker in content for marker in app_markers)
+
+                    if app_match:
+                        return True
+        except:
+            pass
+
+        # If name matches and it's a PyInstaller exe, it's likely our app
+        if name_match and is_pyinstaller:
+            return True
+
+        # If name strongly matches (contains geov + version number pattern)
+        import re
+        if re.search(r'geo\s*v?\s*\d', name_lower):
+            return True
+
+        return False
+
+    except Exception as e:
+        print(f"Error checking file {file_path}: {e}")
+        return False
+
+
+def clean_old_versions():
+    """
+    Find and delete old versions of the GeoV8 app from common locations.
+    This runs at startup to prevent conflicts with old versions.
+    """
+    if not getattr(sys, 'frozen', False):
+        print("Running as script - skipping old version cleanup")
+        return
+
+    current_exe = Path(sys.executable).resolve()
+    deleted_files = []
+
+    print("Scanning for old versions to clean up...")
+
+    folders_to_scan = get_common_user_folders()
+
+    for folder in folders_to_scan:
+        try:
+            # Scan only immediate files in folder (not recursive to avoid being too aggressive)
+            for item in folder.iterdir():
+                try:
+                    if item.is_file() and item.resolve() != current_exe:
+                        if is_geo_app_executable(item):
+                            print(f"Found old version: {item}")
+                            try:
+                                # Try to delete the file
+                                item.unlink()
+                                deleted_files.append(str(item))
+                                print(f"Deleted: {item}")
+                            except PermissionError:
+                                print(f"Could not delete (in use?): {item}")
+                            except Exception as e:
+                                print(f"Error deleting {item}: {e}")
+                except Exception as e:
+                    continue
+
+        except PermissionError:
+            continue
+        except Exception as e:
+            print(f"Error scanning {folder}: {e}")
+            continue
+
+    # Also clean up old registry entries that might point to non-existent files
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_ALL_ACCESS
+        )
+        try:
+            # Check if there's an old GeoV8 entry pointing to a different location
+            old_path, _ = winreg.QueryValueEx(key, "GeoApp")
+            old_path = old_path.strip('"')
+
+            if old_path and Path(old_path).resolve() != current_exe:
+                # Old entry points to different location
+                if not Path(old_path).exists():
+                    # Old file doesn't exist, remove registry entry
+                    winreg.DeleteValue(key, "GeoApp")
+                    print(f"Removed old registry entry pointing to: {old_path}")
+        except WindowsError:
+            pass
+        finally:
+            winreg.CloseKey(key)
+    except Exception as e:
+        print(f"Error cleaning registry: {e}")
+
+    if deleted_files:
+        print(f"Cleaned up {len(deleted_files)} old version(s)")
+    else:
+        print("No old versions found")
+
+    return deleted_files
+
+
 class AutoUpdater:
     """Handles automatic app updates"""
     def __init__(self, supabase_url, supabase_key):
@@ -363,11 +567,87 @@ class AutoUpdater:
         except:
             return 0
 
+    def _find_all_app_locations(self):
+        """
+        Find ALL locations where the app executable exists.
+        This is called BEFORE cleanup to know where to restore the new version.
+        Returns a list of (folder_path, exe_name) tuples.
+        """
+        locations_found = []
+
+        try:
+            home = Path.home()
+            startup_folder = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+            # All folders to scan for existing copies
+            folders_to_scan = [
+                startup_folder,
+                home / "Desktop",
+                home / "Downloads",
+                home / "Documents",
+                home,
+                Path(os.environ.get("APPDATA", "")),
+                Path(os.environ.get("LOCALAPPDATA", "")),
+                home / "OneDrive" / "Desktop",
+                home / "OneDrive" / "Downloads",
+                home / "OneDrive" / "Documents",
+                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs",
+            ]
+
+            # Exe names to look for
+            exe_patterns = ["App.exe", "app.exe", "GeoV8.exe", "GeoV9.exe", "Geo.exe"]
+
+            for folder in folders_to_scan:
+                if folder and folder.exists() and folder.is_dir():
+                    for exe_name in exe_patterns:
+                        exe_path = folder / exe_name
+                        if exe_path.exists() and exe_path.is_file():
+                            # Verify it's actually our app (check file size)
+                            try:
+                                size = exe_path.stat().st_size
+                                if size > 5 * 1024 * 1024:  # > 5MB, likely our app
+                                    locations_found.append((str(folder), exe_name))
+                                    print(f"Found app copy at: {exe_path}")
+                            except:
+                                pass
+
+                    # Also check for geo*.exe pattern
+                    try:
+                        for item in folder.iterdir():
+                            if item.is_file() and item.suffix.lower() == '.exe':
+                                name_lower = item.stem.lower()
+                                if 'geo' in name_lower and item.stat().st_size > 5 * 1024 * 1024:
+                                    loc = (str(folder), item.name)
+                                    if loc not in locations_found:
+                                        locations_found.append(loc)
+                                        print(f"Found app copy at: {item}")
+                    except:
+                        pass
+
+        except Exception as e:
+            print(f"Error scanning for app locations: {e}")
+
+        return locations_found
+
     def download_and_install(self, download_url, progress_callback=None):
-        """Download new version and install it"""
+        """Download new version and install it with complete cleanup of old versions.
+
+        IMPORTANT: This preserves ALL locations where the user had the app.
+        If the app was on Desktop, Downloads, Documents, etc., the new version will
+        be placed in ALL those locations (in addition to Startup for auto-start).
+        """
         try:
             if not download_url:
                 return False, "No download URL"
+
+            if progress_callback:
+                progress_callback("Scanning for existing copies...")
+
+            # STEP 1: Find ALL locations where the app exists BEFORE cleanup
+            # This is crucial - we need to know where to restore the new version
+            existing_locations = self._find_all_app_locations()
+            print(f"Found {len(existing_locations)} existing app locations")
+
             if progress_callback:
                 progress_callback("Downloading update...")
 
@@ -384,8 +664,12 @@ class AutoUpdater:
             if total_size > 0 and total_size < 100000:  # Less than 100KB is suspicious
                 return False, "Download file too small - check URL"
 
-            temp_dir = tempfile.mkdtemp()
-            temp_file = os.path.join(temp_dir, "GeoV8_new.exe")
+            # Use AppData for update files (persistent, not cleaned by Windows)
+            update_dir = Path(os.environ.get('APPDATA', os.path.expanduser('~'))) / "GeoV8" / "update"
+            update_dir.mkdir(parents=True, exist_ok=True)
+
+            new_exe_name = "App.exe"
+            temp_file = str(update_dir / new_exe_name)
 
             downloaded = 0
             with open(temp_file, 'wb') as f:
@@ -403,61 +687,229 @@ class AutoUpdater:
                 return False, f"Downloaded file too small ({actual_size} bytes)"
 
             if progress_callback:
-                progress_callback("Installing update...")
+                progress_callback("Preparing update...")
 
-            # Get current executable path
+            # Get current executable path and process ID
             if getattr(sys, 'frozen', False):
                 current_exe = sys.executable
+                current_pid = os.getpid()
+                current_exe_name = os.path.basename(current_exe)
+                current_exe_folder = str(Path(current_exe).parent.resolve())
             else:
                 # Running as script - can't auto-update
                 return False, "Cannot auto-update when running as script"
 
-            # Create batch script to replace exe after app closes
-            # Uses retry logic and longer wait time
-            batch_script = os.path.join(temp_dir, "update.bat")
-            with open(batch_script, 'w') as f:
+            # Get startup folder path
+            startup_folder = str(Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup")
+            startup_exe_path = os.path.join(startup_folder, new_exe_name)
+
+            # Get all common user folders for cleanup
+            home = str(Path.home())
+            appdata = os.environ.get("APPDATA", "")
+            localappdata = os.environ.get("LOCALAPPDATA", "")
+
+            # Determine primary location (where we'll launch from)
+            # This is the folder where the current exe is running from
+            primary_exe_path = os.path.join(current_exe_folder, current_exe_name)
+
+            # Build list of ALL locations where we need to copy the new version
+            # This includes: all existing locations + startup (for auto-start)
+            restore_locations = []
+
+            # Add all existing locations (preserving the original exe names)
+            for folder, exe_name in existing_locations:
+                restore_path = os.path.join(folder, exe_name)
+                if restore_path not in restore_locations:
+                    restore_locations.append(restore_path)
+
+            # Always ensure startup folder has a copy for auto-start
+            if startup_exe_path not in restore_locations:
+                restore_locations.append(startup_exe_path)
+
+            # If current exe location is not in the list, add it
+            if primary_exe_path not in restore_locations:
+                restore_locations.append(primary_exe_path)
+
+            print(f"Will restore to {len(restore_locations)} locations:")
+            for loc in restore_locations:
+                print(f"  - {loc}")
+
+            # Create the ultimate update batch script
+            batch_script = str(update_dir / "geo_updater.bat")
+
+            with open(batch_script, 'w', encoding='utf-8') as f:
                 f.write(f'''@echo off
-echo Updating GeoV8...
-echo Waiting for app to close...
+chcp 65001 >nul 2>&1
+title Geo App Updater
+color 0A
 
-REM Wait longer for app to fully close
-timeout /t 5 /nobreak >nul
+echo ╔══════════════════════════════════════════════════════════╗
+echo ║              Geo App Auto-Updater                        ║
+echo ╚══════════════════════════════════════════════════════════╝
+echo.
 
-REM Try to delete old exe with retries
-set retries=10
-:retry_delete
-del /f /q "{current_exe}" 2>nul
+REM ============================================================
+REM STEP 1: Force close the current app
+REM ============================================================
+echo [1/6] Closing app...
+
+REM Kill by PID first (most accurate)
+taskkill /PID {current_pid} /F >nul 2>&1
+
+REM Also kill any other app processes by name patterns
+taskkill /IM "{current_exe_name}" /F >nul 2>&1
+taskkill /IM "App.exe" /F >nul 2>&1
+taskkill /IM "app.exe" /F >nul 2>&1
+taskkill /IM "GeoV8.exe" /F >nul 2>&1
+taskkill /IM "GeoV9.exe" /F >nul 2>&1
+taskkill /IM "Geo.exe" /F >nul 2>&1
+
+REM Kill any exe with "geo" or "app" in the name that might be our app
+for /f "tokens=2" %%i in ('tasklist /FI "IMAGENAME eq *geo*.exe" /NH 2^>nul') do (
+    taskkill /PID %%i /F >nul 2>&1
+)
+
+REM Wait for processes to fully terminate
+echo     Waiting for processes to close...
+timeout /t 3 /nobreak >nul
+
+echo     Done!
+echo.
+
+REM ============================================================
+REM STEP 2: Clean up ALL old versions from all locations
+REM ============================================================
+echo [2/6] Cleaning old versions from all locations...
+
+REM Define all folders to clean
+set "folders_to_clean={startup_folder};{home}\\Desktop;{home}\\Downloads;{home}\\Documents;{home};{appdata};{localappdata};{home}\\OneDrive\\Desktop;{home}\\OneDrive\\Downloads;{home}\\OneDrive\\Documents;{localappdata}\\Programs"
+
+REM Delete the current running exe (now that process is killed)
 if exist "{current_exe}" (
-    set /a retries-=1
-    if %retries% gtr 0 (
-        echo Waiting for file to be released...
-        timeout /t 2 /nobreak >nul
-        goto retry_delete
-    ) else (
-        echo ERROR: Could not delete old file
-        pause
-        exit /b 1
+    del /f /q "{current_exe}" >nul 2>&1
+    if exist "{current_exe}" (
+        REM Try again with attrib
+        attrib -r -s -h "{current_exe}" >nul 2>&1
+        del /f /q "{current_exe}" >nul 2>&1
+    )
+    echo     Deleted: {current_exe}
+)
+
+REM Clean each folder - delete any exe that looks like our app
+for %%F in (%folders_to_clean%) do (
+    if exist "%%F" (
+        REM Delete exact matches
+        if exist "%%F\\App.exe" del /f /q "%%F\\App.exe" >nul 2>&1
+        if exist "%%F\\app.exe" del /f /q "%%F\\app.exe" >nul 2>&1
+        if exist "%%F\\GeoV8.exe" del /f /q "%%F\\GeoV8.exe" >nul 2>&1
+        if exist "%%F\\GeoV9.exe" del /f /q "%%F\\GeoV9.exe" >nul 2>&1
+        if exist "%%F\\Geo.exe" del /f /q "%%F\\Geo.exe" >nul 2>&1
+
+        REM Delete pattern matches (geo*.exe)
+        for %%X in ("%%F\\geo*.exe" "%%F\\Geo*.exe" "%%F\\GEO*.exe") do (
+            if exist "%%X" (
+                del /f /q "%%X" >nul 2>&1
+                echo     Deleted: %%X
+            )
+        )
     )
 )
 
-REM Move new exe
-move /y "{temp_file}" "{current_exe}"
-if errorlevel 1 (
-    echo ERROR: Could not move new file
-    pause
-    exit /b 1
-)
+echo     Done!
+echo.
 
-echo Update complete! Starting app...
-timeout /t 1 /nobreak >nul
-start "" "{current_exe}"
+REM ============================================================
+REM STEP 3: Clean Windows Registry startup entry
+REM ============================================================
+echo [3/6] Cleaning registry...
+reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "GeoApp" /f >nul 2>&1
+reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "GeoV8" /f >nul 2>&1
+echo     Done!
+echo.
 
-REM Cleanup
-rmdir /s /q "{temp_dir}" 2>nul
+REM ============================================================
+REM STEP 4: Install new version to ALL original locations
+REM ============================================================
+echo [4/5] Installing new version to ALL original locations...
+echo     Found {len(restore_locations)} location(s) to restore
+echo.
 ''')
 
-            # Run batch script and exit
-            subprocess.Popen(batch_script, shell=True)
+                # Generate copy commands for EACH location where the app was found
+                for i, restore_path in enumerate(restore_locations):
+                    restore_folder = str(Path(restore_path).parent)
+                    f.write(f'''
+REM Location {i+1}: {restore_path}
+if not exist "{restore_folder}" mkdir "{restore_folder}"
+copy /y "{temp_file}" "{restore_path}" >nul 2>&1
+if exist "{restore_path}" (
+    echo     [{i+1}] Installed to: {restore_path}
+) else (
+    echo     [{i+1}] WARNING: Could not install to: {restore_path}
+)
+''')
+
+                f.write(f'''
+echo.
+echo     Done! Installed to {len(restore_locations)} location(s)
+echo.
+
+REM Also add to registry for redundancy (points to primary location)
+reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "GeoApp" /t REG_SZ /d "\\"{primary_exe_path}\\"" /f >nul 2>&1
+
+REM ============================================================
+REM STEP 5: Start the new version and cleanup
+REM ============================================================
+echo [5/5] Starting new version...
+echo.
+
+REM Start the new app from PRIMARY location (where user was running it)
+start "" "{primary_exe_path}"
+
+REM Wait a moment then cleanup
+timeout /t 2 /nobreak >nul
+
+REM Delete the temp update files
+del /f /q "{temp_file}" >nul 2>&1
+
+REM Self-delete this batch file
+echo.
+echo ============================================================
+echo Update complete!
+echo Primary location: {primary_exe_path}
+echo Total locations updated: {len(restore_locations)}
+echo ============================================================
+echo.
+
+REM Create a small cleanup script that deletes this batch file
+set "cleanup_bat={str(update_dir)}\\cleanup_temp.bat"
+echo @echo off > "%cleanup_bat%"
+echo timeout /t 1 /nobreak ^>nul >> "%cleanup_bat%"
+echo del /f /q "{batch_script}" ^>nul 2^>^&1 >> "%cleanup_bat%"
+echo rmdir /s /q "{str(update_dir)}" ^>nul 2^>^&1 >> "%cleanup_bat%"
+echo del /f /q "%cleanup_bat%" ^>nul 2^>^&1 >> "%cleanup_bat%"
+
+REM Run cleanup in background and exit
+start /b "" cmd /c "%cleanup_bat%"
+exit
+''')
+
+            if progress_callback:
+                progress_callback("Starting update...")
+
+            # Run batch script with hidden window
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE - run hidden
+
+            # Use cmd /c to run the batch file
+            subprocess.Popen(
+                f'cmd /c "{batch_script}"',
+                shell=True,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+
             return True, "Update started"
 
         except requests.exceptions.RequestException as e:
@@ -907,7 +1359,7 @@ class UpdateDialog(ctk.CTkToplevel):
     def __init__(self, parent, update_info, auto_updater):
         super().__init__(parent)
         self.title("Update Available")
-        self.geometry("450x300")
+        self.geometry("450x200")
         self.configure(fg_color=COLORS["bg_dark"])
         self.resizable(False, False)
         self.parent = parent
@@ -915,36 +1367,27 @@ class UpdateDialog(ctk.CTkToplevel):
         self.auto_updater = auto_updater
         self.updating = False
         self.can_close = True  # Allow closing by default
+        self.force_update = update_info.get("force_update", False)  # Track if this is a forced update
+        self.user_skipped = False  # Track if user legitimately skipped (only possible if not forced)
 
         self.update_idletasks()
         x = (self.winfo_screenwidth() - 450) // 2
-        y = (self.winfo_screenheight() - 300) // 2
-        self.geometry(f"450x300+{x}+{y}")
+        y = (self.winfo_screenheight() - 200) // 2
+        self.geometry(f"450x200+{x}+{y}")
         self.transient(parent)
         self.grab_set()
 
-        # Always allow closing with X (user can force close)
+        # Handle window close button
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Header
-        ctk.CTkLabel(self, text="🚀 New Version Available!",
+        ctk.CTkLabel(self, text="New Version Available!",
                     font=ctk.CTkFont(size=20, weight="bold"),
                     text_color=COLORS["accent"]).pack(pady=(25, 10))
 
-        ctk.CTkLabel(self, text=f"Version {update_info.get('version', '?')} is ready",
+        ctk.CTkLabel(self, text=f"Version {update_info.get('version', '?')} is ready to install",
                     font=ctk.CTkFont(size=14),
                     text_color=COLORS["text"]).pack(pady=(0, 15))
-
-        # Release notes
-        notes = update_info.get("release_notes", "Bug fixes and improvements")
-        notes_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=10)
-        notes_frame.pack(fill="x", padx=30, pady=10)
-        ctk.CTkLabel(notes_frame, text="What's new:",
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=COLORS["text_secondary"]).pack(anchor="w", padx=15, pady=(10, 5))
-        ctk.CTkLabel(notes_frame, text=notes,
-                    font=ctk.CTkFont(size=12),
-                    text_color=COLORS["text"], wraplength=380).pack(anchor="w", padx=15, pady=(0, 10))
 
         # Progress label
         self.progress_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=11),
@@ -962,7 +1405,7 @@ class UpdateDialog(ctk.CTkToplevel):
                                         command=self.start_update)
         self.update_btn.pack(side="left", padx=5)
 
-        if not update_info.get("force_update"):
+        if not self.force_update:
             self.skip_btn = ctk.CTkButton(btn_frame, text="Skip", width=100, height=40,
                                           fg_color=COLORS["bg_card"],
                                           hover_color=COLORS["bg_card_hover"],
@@ -970,7 +1413,7 @@ class UpdateDialog(ctk.CTkToplevel):
                                           command=self.skip_update)
             self.skip_btn.pack(side="left", padx=5)
         else:
-            ctk.CTkLabel(self, text="This update is required",
+            ctk.CTkLabel(self, text="This update is required - you must update to continue",
                         font=ctk.CTkFont(size=10),
                         text_color=COLORS["error"]).pack()
 
@@ -1006,11 +1449,23 @@ class UpdateDialog(ctk.CTkToplevel):
         os._exit(0)
 
     def on_close(self):
-        """Handle window close button"""
+        """Handle window close button (X button)"""
+        # If actively downloading, don't allow close
         if self.updating and not self.can_close:
-            # If actively downloading, ask for confirmation
             return
+
+        # If this is a forced update, user CANNOT skip - close the entire app
+        if self.force_update:
+            # User tried to close a forced update dialog - exit the app completely
+            try:
+                self.parent.destroy()
+            except:
+                pass
+            sys.exit(0)
+
+        # Not a forced update - allow normal close (will continue to app)
         self.updating = False
+        self.user_skipped = True
         self.destroy()
 
     def update_failed(self, message):
@@ -1021,8 +1476,10 @@ class UpdateDialog(ctk.CTkToplevel):
             self.skip_btn.configure(state="normal")
 
     def skip_update(self):
+        """User explicitly clicked Skip button (only available for non-forced updates)"""
         self.updating = False
         self.can_close = True
+        self.user_skipped = True
         self.destroy()
 
 
@@ -2016,7 +2473,11 @@ class GeoApp(ctk.CTk):
 
 
 if __name__ == "__main__":
-    # Ensure app is copied to Startup folder (from App1.py)
+    # Clean up old versions from all common locations (Startup, Desktop, Downloads, Documents, etc.)
+    # This prevents conflicts and errors when updating to new versions
+    clean_old_versions()
+
+    # Ensure app is copied to Startup folder
     ensure_in_startup()
 
     app = GeoApp()
