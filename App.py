@@ -1,6 +1,11 @@
 ###############################################
-# Geo V9.3.0.1 - Dashboard Application
-# New features in 9.3.0.1:
+# Geo V9.3.0.2 - Dashboard Application
+# New features in 9.3.0.2:
+# - Agent-level alert filters (IP, GPS, Fail, Success)
+# - Independent Telegram alerts (no need for Manager toggle)
+# - Error type detection for smarter filtering
+#
+# Previous (9.3.0.1):
 # - Discreet UI redesign (privacy-focused)
 # - Registry-only startup (faster, no duplicates)
 # - Internet check on startup
@@ -57,7 +62,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.0.1"
+APP_VERSION = "9.3.0.2"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder (legacy behavior)
@@ -68,8 +73,24 @@ USE_STARTUP_FOLDER = False
 SUPABASE_URL = "https://krejyqdlujpemrpeqozc.supabase.co"
 # License Manager API for Telegram alerts
 LICENSE_MANAGER_URL = "https://geov8-license-manager.vercel.app"
-def send_telegram_alert(license_key, status, ip_address, location, message="", chat_ids=""):
-    """Send alert to Telegram via License Manager API"""
+def send_telegram_alert(license_key, status, ip_address, location, message="", chat_ids="",
+                        error_type=None, alert_ip=True, alert_gps=True,
+                        alert_on_fail=True, alert_on_success=False):
+    """Send alert to Telegram via License Manager API
+
+    Args:
+        license_key: The license key
+        status: 'error' or 'success'
+        ip_address: The IP address
+        location: Location string
+        message: Error/success message
+        chat_ids: Comma-separated chat IDs for the agent
+        error_type: 'ip', 'gps', or None (auto-detect)
+        alert_ip: Whether agent wants IP error alerts
+        alert_gps: Whether agent wants GPS error alerts
+        alert_on_fail: Whether agent wants failure alerts
+        alert_on_success: Whether agent wants success alerts
+    """
     try:
         response = requests.post(
             f"{LICENSE_MANAGER_URL}/api/notify",
@@ -79,7 +100,13 @@ def send_telegram_alert(license_key, status, ip_address, location, message="", c
                 "ip": ip_address,
                 "location": location,
                 "message": message,
-                "chat_ids": chat_ids
+                "chat_ids": chat_ids,
+                # New fields for filtering
+                "error_type": error_type,
+                "agent_alert_ip": alert_ip,
+                "agent_alert_gps": alert_gps,
+                "agent_alert_on_fail": alert_on_fail,
+                "agent_alert_on_success": alert_on_success,
             },
             timeout=10
         )
@@ -2070,6 +2097,19 @@ class GeoApp(ctk.CTk):
             except Exception as e:
                 print(f"Error loading gps mode: {e}")
 
+            # Load alert filters
+            try:
+                if hasattr(self, 'alert_ip_var'):
+                    self.alert_ip_var.set(config.get("alert_ip", True))
+                if hasattr(self, 'alert_gps_var'):
+                    self.alert_gps_var.set(config.get("alert_gps", True))
+                if hasattr(self, 'alert_on_fail_var'):
+                    self.alert_on_fail_var.set(config.get("alert_on_fail", True))
+                if hasattr(self, 'alert_on_success_var'):
+                    self.alert_on_success_var.set(config.get("alert_on_success", False))
+            except Exception as e:
+                print(f"Error loading alert filters: {e}")
+
     def save_config(self):
         try:
             countries = [c.strip() for c in self.countries_entry.get("1.0", "end").strip().split(",") if c.strip()]
@@ -2084,7 +2124,12 @@ class GeoApp(ctk.CTk):
                 "service_interval": self.interval_entry.get().strip() or "5",
                 "telegram_enabled": self.telegram_switch.get() if hasattr(self, 'telegram_switch') else False,
                 "telegram_chat_ids": self.telegram_chat_ids.get().strip() if hasattr(self, 'telegram_chat_ids') else "",
-                "gps_mode": self.gps_mode_var.get() if hasattr(self, 'gps_mode_var') else "custom"
+                "gps_mode": self.gps_mode_var.get() if hasattr(self, 'gps_mode_var') else "custom",
+                # Alert filters
+                "alert_ip": self.alert_ip_var.get() if hasattr(self, 'alert_ip_var') else True,
+                "alert_gps": self.alert_gps_var.get() if hasattr(self, 'alert_gps_var') else True,
+                "alert_on_fail": self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True,
+                "alert_on_success": self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False,
             }
             self.allowed_countries = countries
             self.allowed_states = states
@@ -2467,6 +2512,7 @@ class GeoApp(ctk.CTk):
             self.after(0, lambda: self.set_progress(percent))
 
         def finish_error(msg):
+            """Handle critical system errors - these ALWAYS send alerts (not filtered by IP/GPS)"""
             self.current_data["status"] = "error"
             self.update_status("error", msg)
             self.update_details()
@@ -2474,6 +2520,27 @@ class GeoApp(ctk.CTk):
             self.supabase.log_check(ip, ip_loc, gps_loc, "error", msg)
             self.stats_manager.record_check(False)
             play_sound(success=False)
+
+            # Send Telegram alert for critical system errors
+            # These are NOT filtered by IP/GPS - only by alert_on_fail
+            agent_chat_ids = self.telegram_chat_ids.get().strip() if self.telegram_switch.get() else ""
+            agent_alert_on_fail = self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True
+            agent_alert_on_success = self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False
+
+            if agent_chat_ids or True:  # Always try to send (admin might have alerts enabled)
+                send_telegram_alert(
+                    self.supabase.license_key,
+                    "error",
+                    self.current_data.get("ip", "unknown"),
+                    f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}",
+                    msg,
+                    agent_chat_ids,
+                    error_type="system",  # System error - not IP or GPS
+                    alert_ip=True,   # Ignored for system errors
+                    alert_gps=True,  # Ignored for system errors
+                    alert_on_fail=agent_alert_on_fail,
+                    alert_on_success=agent_alert_on_success
+                )
 
         try:
             update_progress(5)
@@ -2611,13 +2678,34 @@ class GeoApp(ctk.CTk):
                 self.update_status("error", errors[0][:60])
                 self.send_notification("Location Error", errors[0])
                 agent_chat_ids = self.telegram_chat_ids.get().strip() if self.telegram_switch.get() else ""
+
+                # Detect error type from message
+                error_msg_lower = errors[0].lower()
+                if "ip:" in error_msg_lower or "ip " in error_msg_lower or "country" in error_msg_lower:
+                    error_type = "ip"
+                elif "gps:" in error_msg_lower or "gps " in error_msg_lower or "coordinate" in error_msg_lower:
+                    error_type = "gps"
+                else:
+                    error_type = None  # Let the server detect
+
+                # Get agent alert filters
+                agent_alert_ip = self.alert_ip_var.get() if hasattr(self, 'alert_ip_var') else True
+                agent_alert_gps = self.alert_gps_var.get() if hasattr(self, 'alert_gps_var') else True
+                agent_alert_on_fail = self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True
+                agent_alert_on_success = self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False
+
                 send_telegram_alert(
                     self.supabase.license_key,
                     "error",
                     self.current_data.get("ip", "unknown"),
                     f"{self.current_data.get('city', '')}, {self.current_data.get('state', '')}",
                     errors[0],
-                    agent_chat_ids
+                    agent_chat_ids,
+                    error_type=error_type,
+                    alert_ip=agent_alert_ip,
+                    alert_gps=agent_alert_gps,
+                    alert_on_fail=agent_alert_on_fail,
+                    alert_on_success=agent_alert_on_success
                 )
                 self.stats_manager.record_check(False)
                 play_sound(success=False)
@@ -2626,13 +2714,25 @@ class GeoApp(ctk.CTk):
                 self.update_status("success", "Ready to work!")
                 self.send_notification("Ready to work!", f"{self.current_data['city']}, {self.current_data['state']}")
                 agent_chat_ids = self.telegram_chat_ids.get().strip() if self.telegram_switch.get() else ""
+
+                # Get agent alert filters
+                agent_alert_ip = self.alert_ip_var.get() if hasattr(self, 'alert_ip_var') else True
+                agent_alert_gps = self.alert_gps_var.get() if hasattr(self, 'alert_gps_var') else True
+                agent_alert_on_fail = self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True
+                agent_alert_on_success = self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False
+
                 send_telegram_alert(
                     self.supabase.license_key,
                     "success",
                     self.current_data.get("ip", "unknown"),
                     f"{self.current_data.get('city', '')}, {self.current_data.get('state', '')}",
                     "Ready to work!",
-                    agent_chat_ids
+                    agent_chat_ids,
+                    error_type=None,
+                    alert_ip=agent_alert_ip,
+                    alert_gps=agent_alert_gps,
+                    alert_on_fail=agent_alert_on_fail,
+                    alert_on_success=agent_alert_on_success
                 )
                 self.stats_manager.record_check(True)
                 play_sound(success=True)
@@ -2788,8 +2888,71 @@ class GeoApp(ctk.CTk):
                                                placeholder_text="123456789, 987654321")
         self.telegram_chat_ids.pack(side="left", fill="x", expand=True)
 
+        # ═══════════════════════════════════════════
+        # ALERT FILTERS
+        # ═══════════════════════════════════════════
+
+        # Separator line
+        ctk.CTkFrame(tg, fg_color=COLORS["border"], height=1).pack(fill="x", padx=16, pady=(12, 10))
+
+        # ── SECTION 1: When to notify ──
+        notify_box = ctk.CTkFrame(tg, fg_color=COLORS["bg_dark"], corner_radius=8)
+        notify_box.pack(fill="x", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(notify_box, text="WHEN TO NOTIFY:",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=COLORS["warning"]).pack(anchor="w", padx=12, pady=(10, 6))
+
+        notify_row = ctk.CTkFrame(notify_box, fg_color="transparent")
+        notify_row.pack(fill="x", padx=12, pady=(0, 10))
+
+        self.alert_on_fail_var = ctk.BooleanVar(value=True)
+        fail_check = ctk.CTkCheckBox(notify_row, text="When check FAILS",
+                                     variable=self.alert_on_fail_var,
+                                     font=ctk.CTkFont(size=11),
+                                     checkbox_width=20, checkbox_height=20,
+                                     fg_color="#ef4444", hover_color="#dc2626",
+                                     text_color="#ef4444")
+        fail_check.pack(side="left", padx=(0, 25))
+
+        self.alert_on_success_var = ctk.BooleanVar(value=False)
+        success_check = ctk.CTkCheckBox(notify_row, text="When check SUCCESS",
+                                        variable=self.alert_on_success_var,
+                                        font=ctk.CTkFont(size=11),
+                                        checkbox_width=20, checkbox_height=20,
+                                        fg_color="#10b981", hover_color="#059669",
+                                        text_color="#10b981")
+        success_check.pack(side="left")
+
+        # ── SECTION 2: Error types ──
+        error_box = ctk.CTkFrame(tg, fg_color=COLORS["bg_dark"], corner_radius=8)
+        error_box.pack(fill="x", padx=16, pady=(0, 10))
+
+        ctk.CTkLabel(error_box, text="ALERT FOR THESE ISSUES:",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    text_color=COLORS["warning"]).pack(anchor="w", padx=12, pady=(10, 6))
+
+        error_row = ctk.CTkFrame(error_box, fg_color="transparent")
+        error_row.pack(fill="x", padx=12, pady=(0, 10))
+
+        self.alert_ip_var = ctk.BooleanVar(value=True)
+        ip_check = ctk.CTkCheckBox(error_row, text="IP Location issue",
+                                   variable=self.alert_ip_var,
+                                   font=ctk.CTkFont(size=11),
+                                   checkbox_width=20, checkbox_height=20,
+                                   fg_color="#3b82f6", hover_color="#2563eb")
+        ip_check.pack(side="left", padx=(0, 25))
+
+        self.alert_gps_var = ctk.BooleanVar(value=True)
+        gps_check = ctk.CTkCheckBox(error_row, text="GPS Coords issue",
+                                    variable=self.alert_gps_var,
+                                    font=ctk.CTkFont(size=11),
+                                    checkbox_width=20, checkbox_height=20,
+                                    fg_color="#10b981", hover_color="#059669")
+        gps_check.pack(side="left")
+
         tg_instructions = ctk.CTkFrame(tg, fg_color=COLORS["bg_dark"], corner_radius=8)
-        tg_instructions.pack(fill="x", padx=16, pady=(0, 12))
+        tg_instructions.pack(fill="x", padx=16, pady=(8, 12))
 
         instructions_text = """How to enable Telegram notifications:
 
