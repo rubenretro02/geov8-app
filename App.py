@@ -1,6 +1,17 @@
 ###############################################
-# Geo V9.3.0.2 - Dashboard Application
-# New features in 9.3.0.2:
+# Geo V9.3.0.6 - Dashboard Application
+# New features in 9.3.0.6:
+# - Telegram auto-connect with QR code
+# - "Open Telegram Desktop" button
+# - "Copy Link" button for clipboard
+# - List of connected Telegrams with remove option
+# - Automatic polling for connection status
+#
+# Previous (9.3.0.4):
+# - Auto-check when running from Startup folder
+# - Startup folder copy enabled
+#
+# Previous (9.3.0.3):
 # - Agent-level alert filters (IP, GPS, Fail, Success)
 # - Independent Telegram alerts (no need for Manager toggle)
 # - Error type detection for smarter filtering
@@ -61,12 +72,21 @@ try:
 except ImportError:
     pass
 
+# QR Code generation for Telegram auto-link
+QR_AVAILABLE = False
+try:
+    import qrcode
+    from PIL import Image, ImageTk
+    QR_AVAILABLE = True
+except ImportError:
+    pass
+
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.0.2"
+APP_VERSION = "9.3.0.6"
 
 # Startup Configuration
-# Set to True to enable copying app to Startup folder (legacy behavior)
-# Set to False to use only Registry for startup (recommended - faster, no duplicates)
+# Set to True to enable copying app to Startup folder
+# Set to False to use only Registry for startup
 USE_STARTUP_FOLDER = False
 
 # Supabase Config
@@ -78,6 +98,12 @@ def send_telegram_alert(license_key, status, ip_address, location, message="", c
                         alert_on_fail=True, alert_on_success=False):
     """Send alert to Telegram via License Manager API
 
+    IMPORTANT: This function ALWAYS calls the API.
+    The API handles filtering for both agent and admin independently.
+    - Agent filters are passed in the request
+    - Admin filters are stored in the database
+    This ensures the admin receives notifications even if the agent has them disabled.
+
     Args:
         license_key: The license key
         status: 'error' or 'success'
@@ -85,12 +111,19 @@ def send_telegram_alert(license_key, status, ip_address, location, message="", c
         location: Location string
         message: Error/success message
         chat_ids: Comma-separated chat IDs for the agent
-        error_type: 'ip', 'gps', or None (auto-detect)
+        error_type: 'ip', 'gps', 'both', 'system', or None (auto-detect)
         alert_ip: Whether agent wants IP error alerts
         alert_gps: Whether agent wants GPS error alerts
         alert_on_fail: Whether agent wants failure alerts
         alert_on_success: Whether agent wants success alerts
     """
+    # ═══════════════════════════════════════════════════════════════
+    # ALWAYS CALL THE API - Let the server handle filtering
+    # The API will filter independently for agent and admin
+    # ═══════════════════════════════════════════════════════════════
+    print(f"[Telegram] Sending to API: status={status}, error_type={error_type}")
+    print(f"[Telegram] Agent filters: alert_ip={alert_ip}, alert_gps={alert_gps}, alert_on_fail={alert_on_fail}, alert_on_success={alert_on_success}")
+
     try:
         response = requests.post(
             f"{LICENSE_MANAGER_URL}/api/notify",
@@ -101,7 +134,7 @@ def send_telegram_alert(license_key, status, ip_address, location, message="", c
                 "location": location,
                 "message": message,
                 "chat_ids": chat_ids,
-                # New fields for filtering
+                # Agent-level filters (API will use these for agent only)
                 "error_type": error_type,
                 "agent_alert_ip": alert_ip,
                 "agent_alert_gps": alert_gps,
@@ -110,10 +143,109 @@ def send_telegram_alert(license_key, status, ip_address, location, message="", c
             },
             timeout=10
         )
-        print(f"Telegram alert sent: {response.status_code}")
+        print(f"[Telegram] API response: {response.status_code}")
         return response.status_code == 200
     except Exception as e:
-        print(f"Telegram alert failed: {e}")
+        print(f"[Telegram] API call failed: {e}")
+        return False
+
+
+def generate_telegram_link_code(hardware_id):
+    """Generate a link code for Telegram auto-connection
+
+    Args:
+        hardware_id: The device HWID for linking
+
+    Returns:
+        dict with code, link, link_id, expires_at or None on error
+    """
+    try:
+        response = requests.post(
+            f"{LICENSE_MANAGER_URL}/api/telegram/generate-code",
+            json={"hardware_id": hardware_id},
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                return {
+                    "code": data.get("code"),
+                    "link": data.get("link"),
+                    "link_id": data.get("link_id"),
+                    "expires_at": data.get("expires_at")
+                }
+        return None
+    except Exception as e:
+        print(f"[Telegram] Generate code failed: {e}")
+        return None
+
+
+def check_telegram_link_status(link_id):
+    """Check if a Telegram link has been used
+
+    Args:
+        link_id: The link ID to check
+
+    Returns:
+        'pending', 'connected', or 'expired'
+    """
+    try:
+        response = requests.get(
+            f"{LICENSE_MANAGER_URL}/api/telegram/status?link_id={link_id}",
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("status", "pending"), data.get("chat_id")
+        return "error", None
+    except Exception as e:
+        print(f"[Telegram] Check status failed: {e}")
+        return "error", None
+
+
+def get_connected_telegrams(hardware_id):
+    """Get list of connected Telegram accounts for a hardware ID
+
+    Args:
+        hardware_id: The device HWID
+
+    Returns:
+        list of connected telegrams or empty list
+    """
+    try:
+        response = requests.get(
+            f"{LICENSE_MANAGER_URL}/api/telegram/list?hardware_id={hardware_id}",
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                return data.get("telegrams", [])
+        return []
+    except Exception as e:
+        print(f"[Telegram] Get list failed: {e}")
+        return []
+
+
+def remove_telegram_connection(hardware_id, chat_id):
+    """Remove a Telegram connection
+
+    Args:
+        hardware_id: The device HWID
+        chat_id: The chat ID to remove
+
+    Returns:
+        True on success, False on error
+    """
+    try:
+        response = requests.post(
+            f"{LICENSE_MANAGER_URL}/api/telegram/remove",
+            json={"hardware_id": hardware_id, "chat_id": chat_id},
+            timeout=10
+        )
+        return response.status_code == 200 and response.json().get("success")
+    except Exception as e:
+        print(f"[Telegram] Remove failed: {e}")
         return False
 
 
@@ -268,6 +400,32 @@ def get_startup_folder():
         return Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
     except:
         return None
+
+
+def is_running_from_startup():
+    """
+    Check if the app is running from the Startup folder.
+    Returns True if the exe is located inside the Startup folder.
+    """
+    try:
+        if not getattr(sys, 'frozen', False):
+            return False  # Running as script
+
+        current_exe = Path(sys.executable).resolve()
+        startup_folder = get_startup_folder()
+
+        if startup_folder and startup_folder.exists():
+            startup_str = str(startup_folder.resolve()).lower()
+            current_str = str(current_exe).lower()
+
+            if current_str.startswith(startup_str):
+                print(f"Detected: Running from Startup folder")
+                return True
+
+        return False
+    except Exception as e:
+        print(f"Error checking startup location: {e}")
+        return False
 
 
 def is_app_in_startup():
@@ -1713,19 +1871,37 @@ class GeoApp(ctk.CTk):
             return False
 
     def auto_run_on_boot(self):
-        if "--autostart" not in sys.argv:
+        # Check if app should auto-run:
+        # 1. Started with --autostart argument (from Registry)
+        # 2. Running from Startup folder
+        should_auto_run = "--autostart" in sys.argv or is_running_from_startup()
+
+        if not should_auto_run:
             print("Manual launch - skipping auto-check")
             return
+
         print("Auto-start detected - running check...")
         try:
             u = self.username_entry.get().strip()
             p = self.password_entry.get().strip()
-            lat_s = self.lat_entry.get().strip()
-            lon_s = self.lon_entry.get().strip()
-            if all([u, p, lat_s, lon_s]):
-                self.run_check()
+
+            # Check if using auto GPS mode
+            use_auto_coords = hasattr(self, 'gps_mode_var') and self.gps_mode_var.get() == "auto"
+
+            if use_auto_coords:
+                # Auto GPS mode - only need username and password
+                if all([u, p]):
+                    self.run_check()
+                else:
+                    print("Auto-check skipped: missing username/password")
             else:
-                print("Auto-check skipped: missing configuration")
+                # Custom GPS mode - need all fields
+                lat_s = self.lat_entry.get().strip()
+                lon_s = self.lon_entry.get().strip()
+                if all([u, p, lat_s, lon_s]):
+                    self.run_check()
+                else:
+                    print("Auto-check skipped: missing configuration")
         except Exception as e:
             print(f"Auto-check error: {e}")
 
@@ -2527,20 +2703,20 @@ class GeoApp(ctk.CTk):
             agent_alert_on_fail = self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True
             agent_alert_on_success = self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False
 
-            if agent_chat_ids or True:  # Always try to send (admin might have alerts enabled)
-                send_telegram_alert(
-                    self.supabase.license_key,
-                    "error",
-                    self.current_data.get("ip", "unknown"),
-                    f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}",
-                    msg,
-                    agent_chat_ids,
-                    error_type="system",  # System error - not IP or GPS
-                    alert_ip=True,   # Ignored for system errors
-                    alert_gps=True,  # Ignored for system errors
-                    alert_on_fail=agent_alert_on_fail,
-                    alert_on_success=agent_alert_on_success
-                )
+            # The filtering is now done inside send_telegram_alert
+            send_telegram_alert(
+                self.supabase.license_key,
+                "error",
+                self.current_data.get("ip", "unknown"),
+                f"{self.current_data.get('city', '--')}, {self.current_data.get('state', '--')}",
+                msg,
+                agent_chat_ids,
+                error_type="system",  # System error - not IP or GPS
+                alert_ip=True,   # Not used for system errors
+                alert_gps=True,  # Not used for system errors
+                alert_on_fail=agent_alert_on_fail,
+                alert_on_success=agent_alert_on_success
+            )
 
         try:
             update_progress(5)
@@ -2679,14 +2855,39 @@ class GeoApp(ctk.CTk):
                 self.send_notification("Location Error", errors[0])
                 agent_chat_ids = self.telegram_chat_ids.get().strip() if self.telegram_switch.get() else ""
 
-                # Detect error type from message
-                error_msg_lower = errors[0].lower()
-                if "ip:" in error_msg_lower or "ip " in error_msg_lower or "country" in error_msg_lower:
+                # ═══════════════════════════════════════════════════════════════
+                # IMPROVED ERROR TYPE DETECTION
+                # Analyze ALL errors to determine if it's IP, GPS, or BOTH
+                # ═══════════════════════════════════════════════════════════════
+                has_ip_error = False
+                has_gps_error = False
+
+                for err in errors:
+                    err_lower = err.lower()
+                    # Check for IP errors
+                    if "ip:" in err_lower or "ip " in err_lower or "ip location" in err_lower:
+                        has_ip_error = True
+                    # Check for GPS errors
+                    if "gps:" in err_lower or "gps " in err_lower or "coordinate" in err_lower:
+                        has_gps_error = True
+
+                # Also check current_data for invalid flags
+                if self.current_data.get("ip_valid") == False:
+                    has_ip_error = True
+                if self.current_data.get("coord_valid") == False:
+                    has_gps_error = True
+
+                # Determine error_type
+                if has_ip_error and has_gps_error:
+                    error_type = "both"
+                elif has_ip_error:
                     error_type = "ip"
-                elif "gps:" in error_msg_lower or "gps " in error_msg_lower or "coordinate" in error_msg_lower:
+                elif has_gps_error:
                     error_type = "gps"
                 else:
-                    error_type = None  # Let the server detect
+                    error_type = "system"  # Unknown error, treat as system
+
+                print(f"Error detection: has_ip_error={has_ip_error}, has_gps_error={has_gps_error}, error_type={error_type}")
 
                 # Get agent alert filters
                 agent_alert_ip = self.alert_ip_var.get() if hasattr(self, 'alert_ip_var') else True
@@ -2699,7 +2900,7 @@ class GeoApp(ctk.CTk):
                     "error",
                     self.current_data.get("ip", "unknown"),
                     f"{self.current_data.get('city', '')}, {self.current_data.get('state', '')}",
-                    errors[0],
+                    " | ".join(errors),  # Send ALL errors, not just first
                     agent_chat_ids,
                     error_type=error_type,
                     alert_ip=agent_alert_ip,
@@ -2877,16 +3078,35 @@ class GeoApp(ctk.CTk):
         ctk.CTkLabel(tg_header, text="Telegram Notifications", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
 
         self.telegram_switch = ctk.CTkSwitch(tg_header, text="", width=50,
-                                              progress_color=COLORS["success"], button_color=COLORS["text"])
+                                              progress_color=COLORS["success"], button_color=COLORS["text"],
+                                              command=self.on_telegram_switch_changed)
         self.telegram_switch.pack(side="right")
 
-        tg_chat = ctk.CTkFrame(tg, fg_color="transparent")
-        tg_chat.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(tg_chat, text="Chat IDs", width=70, anchor="w", text_color=COLORS["text_secondary"],
-                    font=ctk.CTkFont(size=11)).pack(side="left")
-        self.telegram_chat_ids = ctk.CTkEntry(tg_chat, height=28, font=ctk.CTkFont(size=11),
-                                               placeholder_text="123456789, 987654321")
-        self.telegram_chat_ids.pack(side="left", fill="x", expand=True)
+        # ═══════════════════════════════════════════
+        # CONNECTED TELEGRAMS LIST
+        # ═══════════════════════════════════════════
+        self.tg_list_frame = ctk.CTkFrame(tg, fg_color="transparent")
+        self.tg_list_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        # Connect button
+        self.tg_connect_btn = ctk.CTkButton(
+            self.tg_list_frame,
+            text="+ Connect Telegram",
+            height=32,
+            fg_color=COLORS["accent_secondary"],
+            hover_color="#6d28d9",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.show_telegram_connect_dialog
+        )
+        self.tg_connect_btn.pack(fill="x", pady=(0, 8))
+
+        # Connected telegrams will be shown here
+        self.tg_connected_frame = ctk.CTkFrame(self.tg_list_frame, fg_color="transparent")
+        self.tg_connected_frame.pack(fill="x")
+
+        # Hidden entry for chat_ids (for compatibility)
+        self.telegram_chat_ids = ctk.CTkEntry(tg, height=1, font=ctk.CTkFont(size=1))
+        # Don't pack - keep hidden but accessible
 
         # ═══════════════════════════════════════════
         # ALERT FILTERS
@@ -2951,33 +3171,316 @@ class GeoApp(ctk.CTk):
                                     fg_color="#10b981", hover_color="#059669")
         gps_check.pack(side="left")
 
-        tg_instructions = ctk.CTkFrame(tg, fg_color=COLORS["bg_dark"], corner_radius=8)
-        tg_instructions.pack(fill="x", padx=16, pady=(8, 12))
-
-        instructions_text = """How to enable Telegram notifications:
-
-1. Open Telegram app on your phone or desktop
-2. Search for @userinfobot and open the chat
-3. Click START or send /start
-4. The bot will reply with your info including "Id: 123456789"
-5. Copy that number (your Chat ID)
-6. Paste it in the field above
-7. Enable the toggle switch to receive alerts
-
-After setup, search for @geoalerts_bot and click START
-to allow it to send you notifications.
-
-For multiple users, separate Chat IDs with commas.
-Example: 123456789, 987654321"""
-
-        ctk.CTkLabel(tg_instructions, text=instructions_text,
-                    font=ctk.CTkFont(size=10), text_color=COLORS["text_secondary"],
-                    justify="left", anchor="w").pack(padx=12, pady=10, anchor="w")
+        # Load connected telegrams
+        self.refresh_connected_telegrams()
 
         # Save Button
         ctk.CTkButton(scroll, text="Save", width=120, height=36, corner_radius=10,
                      fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"], text_color="#000",
                      font=ctk.CTkFont(size=12, weight="bold"), command=self.save_config).pack(pady=10)
+
+    def on_telegram_switch_changed(self):
+        """Called when telegram switch is toggled"""
+        if self.telegram_switch.get():
+            # If turning ON and no telegrams connected, show connect dialog
+            chat_ids = self.telegram_chat_ids.get().strip()
+            if not chat_ids:
+                self.show_telegram_connect_dialog()
+
+    def refresh_connected_telegrams(self):
+        """Refresh the list of connected Telegram accounts"""
+        # Clear current list
+        for widget in self.tg_connected_frame.winfo_children():
+            widget.destroy()
+
+        # Get HWID
+        hwid = self.supabase.hwid if hasattr(self, 'supabase') and self.supabase else None
+        if not hwid:
+            return
+
+        # Fetch connected telegrams
+        def fetch():
+            telegrams = get_connected_telegrams(hwid)
+            self.after(0, lambda: self.display_connected_telegrams(telegrams))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def display_connected_telegrams(self, telegrams):
+        """Display the list of connected Telegram accounts"""
+        # Clear current list
+        for widget in self.tg_connected_frame.winfo_children():
+            widget.destroy()
+
+        # Update chat_ids field for compatibility
+        chat_ids = ",".join([t.get("chat_id", "") for t in telegrams])
+        self.telegram_chat_ids.delete(0, "end")
+        self.telegram_chat_ids.insert(0, chat_ids)
+
+        if not telegrams:
+            no_tg = ctk.CTkLabel(
+                self.tg_connected_frame,
+                text="No Telegram accounts connected",
+                font=ctk.CTkFont(size=11),
+                text_color=COLORS["text_secondary"]
+            )
+            no_tg.pack(pady=5)
+            return
+
+        for tg in telegrams:
+            row = ctk.CTkFrame(self.tg_connected_frame, fg_color=COLORS["bg_dark"], corner_radius=6)
+            row.pack(fill="x", pady=2)
+
+            # Icon
+            ctk.CTkLabel(row, text="📱", font=ctk.CTkFont(size=14)).pack(side="left", padx=(8, 4))
+
+            # Username or name
+            name = tg.get("username")
+            if name:
+                name = f"@{name}"
+            else:
+                name = tg.get("first_name", "Telegram User")
+
+            ctk.CTkLabel(
+                row, text=name,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=COLORS["text"]
+            ).pack(side="left", padx=4)
+
+            # Chat ID
+            ctk.CTkLabel(
+                row, text=f"({tg.get('chat_id', '')})",
+                font=ctk.CTkFont(size=10),
+                text_color=COLORS["text_secondary"]
+            ).pack(side="left", padx=4)
+
+            # Remove button
+            chat_id = tg.get("chat_id", "")
+            remove_btn = ctk.CTkButton(
+                row, text="✕", width=24, height=24,
+                fg_color="transparent", hover_color="#ef4444",
+                text_color="#ef4444", font=ctk.CTkFont(size=12),
+                command=lambda cid=chat_id: self.remove_telegram(cid)
+            )
+            remove_btn.pack(side="right", padx=4, pady=4)
+
+    def remove_telegram(self, chat_id):
+        """Remove a Telegram connection"""
+        hwid = self.supabase.hwid if hasattr(self, 'supabase') and self.supabase else None
+        if not hwid:
+            return
+
+        def do_remove():
+            success = remove_telegram_connection(hwid, chat_id)
+            if success:
+                self.after(0, self.refresh_connected_telegrams)
+
+        threading.Thread(target=do_remove, daemon=True).start()
+
+    def show_telegram_connect_dialog(self):
+        """Show dialog with QR code to connect Telegram"""
+        hwid = self.supabase.hwid if hasattr(self, 'supabase') and self.supabase else None
+        if not hwid:
+            messagebox.showerror("Error", "Please activate your license first")
+            return
+
+        # Create dialog window
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Connect Telegram")
+        dialog.geometry("400x500")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center dialog
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 500) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        # Configure dialog colors
+        dialog.configure(fg_color=COLORS["bg_dark"])
+
+        # Header
+        ctk.CTkLabel(
+            dialog, text="📱 Connect Telegram",
+            font=ctk.CTkFont(size=18, weight="bold")
+        ).pack(pady=(20, 10))
+
+        # Status label
+        status_label = ctk.CTkLabel(
+            dialog, text="Generating link...",
+            font=ctk.CTkFont(size=12),
+            text_color=COLORS["text_secondary"]
+        )
+        status_label.pack(pady=5)
+
+        # QR frame
+        qr_frame = ctk.CTkFrame(dialog, fg_color=COLORS["bg_card"], corner_radius=12)
+        qr_frame.pack(padx=20, pady=10, fill="x")
+
+        qr_label = ctk.CTkLabel(qr_frame, text="")
+        qr_label.pack(pady=15)
+
+        # Code display (for manual entry)
+        code_label = ctk.CTkLabel(
+            qr_frame, text="",
+            font=ctk.CTkFont(size=10),
+            text_color=COLORS["text_secondary"]
+        )
+        code_label.pack(pady=(0, 10))
+
+        # Buttons frame
+        btns_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns_frame.pack(fill="x", padx=20, pady=5)
+
+        # Open Telegram button (Desktop/Mobile)
+        link_btn = ctk.CTkButton(
+            btns_frame, text="🖥️  Open Telegram Desktop",
+            fg_color=COLORS["accent_secondary"],
+            hover_color="#6d28d9",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            height=36,
+            state="disabled"
+        )
+        link_btn.pack(fill="x", pady=2)
+
+        # Copy link button
+        copy_btn = ctk.CTkButton(
+            btns_frame, text="📋  Copy Link",
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_card_hover"],
+            border_width=1,
+            border_color=COLORS["border"],
+            font=ctk.CTkFont(size=11),
+            height=32,
+            state="disabled"
+        )
+        copy_btn.pack(fill="x", pady=2)
+
+        # Instructions
+        instructions = """📱 Mobile: Scan QR with your phone camera
+🖥️ Desktop: Click "Open Telegram Desktop"
+📋 Or copy the link and paste in Telegram
+
+After opening, press START in the bot chat."""
+
+        ctk.CTkLabel(
+            dialog, text=instructions,
+            font=ctk.CTkFont(size=10),
+            text_color=COLORS["text_secondary"],
+            justify="left"
+        ).pack(padx=20, pady=8)
+
+        # Cancel button
+        ctk.CTkButton(
+            dialog, text="Cancel",
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLORS["border"],
+            hover_color=COLORS["bg_card"],
+            command=dialog.destroy
+        ).pack(pady=10)
+
+        # Store polling state
+        dialog.polling = True
+        dialog.link_data = None
+
+        def generate_and_show():
+            link_data = generate_telegram_link_code(hwid)
+            if not link_data:
+                self.after(0, lambda: status_label.configure(text="Error generating link. Try again.", text_color="#ef4444"))
+                return
+
+            dialog.link_data = link_data
+
+            # Generate QR code
+            qr_image = None
+            if QR_AVAILABLE:
+                try:
+                    qr = qrcode.QRCode(version=1, box_size=6, border=2)
+                    qr.add_data(link_data["link"])
+                    qr.make(fit=True)
+                    img = qr.make_image(fill_color="black", back_color="white")
+                    img = img.resize((180, 180))
+                    qr_image = ImageTk.PhotoImage(img)
+                except Exception as e:
+                    print(f"QR generation error: {e}")
+
+            def update_ui():
+                status_label.configure(text="Waiting for connection...", text_color=COLORS["accent"])
+
+                if qr_image:
+                    qr_label.configure(image=qr_image)
+                    qr_label.image = qr_image  # Keep reference
+                else:
+                    qr_label.configure(text=f"📱 Scan QR or use buttons below")
+
+                # Show code for reference
+                code_label.configure(text=f"Code: {link_data['code']}")
+
+                # Open Telegram link
+                def open_link():
+                    import webbrowser
+                    webbrowser.open(link_data["link"])
+
+                link_btn.configure(state="normal", command=open_link)
+
+                # Copy link to clipboard
+                def copy_link():
+                    try:
+                        dialog.clipboard_clear()
+                        dialog.clipboard_append(link_data["link"])
+                        copy_btn.configure(text="✓ Copied!")
+                        self.after(2000, lambda: copy_btn.configure(text="📋  Copy Link"))
+                    except:
+                        pass
+
+                copy_btn.configure(state="normal", command=copy_link)
+
+            self.after(0, update_ui)
+
+            # Start polling
+            poll_status()
+
+        def poll_status():
+            if not dialog.winfo_exists() or not dialog.polling:
+                return
+
+            if not dialog.link_data:
+                self.after(2000, poll_status)
+                return
+
+            status, chat_id = check_telegram_link_status(dialog.link_data["link_id"])
+
+            if status == "connected":
+                dialog.polling = False
+                self.after(0, lambda: on_connected(chat_id))
+            elif status == "expired":
+                dialog.polling = False
+                self.after(0, lambda: status_label.configure(text="Code expired. Close and try again.", text_color="#ef4444"))
+            else:
+                # Still pending, poll again
+                self.after(3000, poll_status)
+
+        def on_connected(chat_id):
+            status_label.configure(text="✓ Connected successfully!", text_color=COLORS["success"])
+            link_btn.configure(text="Done!", state="disabled")
+
+            # Refresh list and close after delay
+            self.refresh_connected_telegrams()
+            self.telegram_switch.select()  # Turn on switch
+
+            self.after(1500, dialog.destroy)
+
+        # Handle dialog close
+        def on_close():
+            dialog.polling = False
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+
+        # Start generation in background
+        threading.Thread(target=generate_and_show, daemon=True).start()
 
     def toggle_gps_mode(self):
         if self.gps_mode_var.get() == "auto":
