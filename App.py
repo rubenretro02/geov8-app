@@ -1,6 +1,14 @@
 ###############################################
-# Geo V9.3.0.6 - Dashboard Application
-# New features in 9.3.0.6:
+# Geo V9.3.0.7 - Dashboard Application
+# New features in 9.3.0.7:
+# - FIX: HWID now retries WMIC commands 3 times before fallback
+# - FIX: Prevents false "License in use on another device" errors
+# - FIX: Added logging for HWID generation debugging
+# - Increased WMIC timeout from 10s to 15s
+# - NEW: License dialog shows existing license for easy support
+# - NEW: License is pre-filled and copyable when expired/reset
+#
+# Previous (9.3.0.6):
 # - Telegram auto-connect with QR code
 # - "Open Telegram Desktop" button
 # - "Copy Link" button for clipboard
@@ -82,7 +90,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.0.6"
+APP_VERSION = "9.3.0.7"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -1156,26 +1164,73 @@ def play_sound(success=True):
 
 
 def get_hardware_id():
-    """Generate HWID from physical hardware (doesn't change on Windows reset)"""
-    def run_wmic(cmd):
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, shell=True, timeout=10)
-            lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
-            return lines[1] if len(lines) > 1 else ""
-        except:
-            return ""
+    """
+    Generate HWID from physical hardware (doesn't change on Windows reset).
+
+    v9.3.0.7 FIX: Added retries to WMIC commands to prevent HWID changes
+    when Windows is slow to respond after boot/reset.
+
+    IMPORTANT: Format MUST stay as: f"{bios}-{baseboard}-{uuid}"
+    to maintain compatibility with existing licenses.
+    """
+    def run_wmic(cmd, max_retries=3, retry_delay=2):
+        """Run WMIC command with retries for stability."""
+        for attempt in range(max_retries):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    shell=True,
+                    timeout=15
+                )
+                lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+                value = lines[1] if len(lines) > 1 else ""
+
+                # If we got a value, return it
+                if value:
+                    print(f"[HWID] {cmd.split()[-1]}: OK")
+                    return value
+
+                # Empty value - retry if we have attempts left
+                if attempt < max_retries - 1:
+                    print(f"[HWID] {cmd.split()[-1]}: empty, retry {attempt + 2}/{max_retries}")
+                    time.sleep(retry_delay)
+
+            except subprocess.TimeoutExpired:
+                print(f"[HWID] {cmd.split()[-1]}: timeout, retry {attempt + 2}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+            except Exception as e:
+                print(f"[HWID] {cmd.split()[-1]}: error ({e})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+
+        print(f"[HWID] {cmd.split()[-1]}: FAILED after {max_retries} attempts")
+        return ""
 
     try:
+        # Get hardware IDs with retries
         bios_serial = run_wmic("wmic bios get serialnumber")
         baseboard_serial = run_wmic("wmic baseboard get serialnumber")
         system_uuid = run_wmic("wmic csproduct get uuid")
+
+        # CRITICAL: Keep exact same format for compatibility
         combined = f"{bios_serial}-{baseboard_serial}-{system_uuid}"
+
+        # Only use fallback if ALL three failed
         if combined == "--":
+            print("[HWID] WARNING: All WMIC failed, using fallback (MAC+processor)")
             machine_id = str(uuid.getnode())
             processor = platform.processor()
             combined = f"{machine_id}-{processor}"
-        return hashlib.sha256(combined.encode()).hexdigest()[:32].upper()
-    except:
+
+        hwid = hashlib.sha256(combined.encode()).hexdigest()[:32].upper()
+        print(f"[HWID] Generated: {hwid}")
+        return hwid
+
+    except Exception as e:
+        print(f"[HWID] Critical error: {e}, using fallback")
         machine_id = str(uuid.getnode())
         processor = platform.processor()
         combined = f"{machine_id}-{processor}"
@@ -1548,36 +1603,78 @@ class LicenseDialog(ctk.CTkToplevel):
     def __init__(self, parent, supabase_manager, error_msg=None):
         super().__init__(parent)
         self.title("License")
-        self.geometry("400x250")
         self.configure(fg_color=COLORS["bg_dark"])
         self.resizable(False, False)
         self.parent = parent
         self.supabase = supabase_manager
         self.activated = False
+
+        # Try to get existing license from local file for support
+        existing_license = None
+        try:
+            if LICENSE_PATH.exists():
+                with open(LICENSE_PATH, 'r') as f:
+                    data = json.load(f)
+                    existing_license = data.get("license_key")
+        except:
+            pass
+
+        # Adjust window size based on whether we have license info to show
+        has_info = existing_license or error_msg in ["Expired", "Reset", "HWID mismatch", "Deactivated"]
+        window_height = 320 if has_info else 250
+        self.geometry(f"400x{window_height}")
+
         self.update_idletasks()
         x = (self.winfo_screenwidth() - 400) // 2
-        y = (self.winfo_screenheight() - 250) // 2
-        self.geometry(f"400x250+{x}+{y}")
+        y = (self.winfo_screenheight() - window_height) // 2
+        self.geometry(f"400x{window_height}+{x}+{y}")
         self.transient(parent)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         if error_msg == "Expired":
-            ctk.CTkLabel(self, text="License Expired", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["error"]).pack(pady=(20, 5))
-            ctk.CTkLabel(self, text="Enter a new license key", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 15))
+            ctk.CTkLabel(self, text="⚠️ License Expired", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["error"]).pack(pady=(20, 5))
+            ctk.CTkLabel(self, text="Contact support to renew", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
         elif error_msg == "Reset":
-            ctk.CTkLabel(self, text="License Reset", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["warning"]).pack(pady=(20, 5))
-            ctk.CTkLabel(self, text="Your license was reset. Please re-enter your key.", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 15))
-        elif error_msg == "Missing":
+            ctk.CTkLabel(self, text="🔄 License Reset", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["warning"]).pack(pady=(20, 5))
+            ctk.CTkLabel(self, text="Your license was reset by admin", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
+        elif error_msg == "HWID mismatch":
+            ctk.CTkLabel(self, text="🖥️ Device Changed", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["error"]).pack(pady=(20, 5))
+            ctk.CTkLabel(self, text="Contact support for HWID reset", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
+        elif error_msg == "Deactivated":
+            ctk.CTkLabel(self, text="🚫 License Deactivated", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["error"]).pack(pady=(20, 5))
+            ctk.CTkLabel(self, text="Contact support for help", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
+        elif error_msg == "No license":
             ctk.CTkLabel(self, text="Enter License Key", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["text"]).pack(pady=(30, 20))
         else:
-            ctk.CTkLabel(self, text="Enter License Key", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["text"]).pack(pady=(30, 20))
+            # Show the error message if it's something else (like connection errors)
+            ctk.CTkLabel(self, text="License Error", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["error"]).pack(pady=(20, 5))
+            if error_msg:
+                ctk.CTkLabel(self, text=error_msg, font=ctk.CTkFont(size=11), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
+
+        # Show existing license for support (copyable)
+        if existing_license:
+            info_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
+            info_frame.pack(fill="x", padx=30, pady=(5, 10))
+            ctk.CTkLabel(info_frame, text="Your license:", font=ctk.CTkFont(size=10),
+                        text_color=COLORS["text_secondary"]).pack(anchor="w", padx=10, pady=(5, 0))
+            license_display = ctk.CTkEntry(info_frame, width=260, height=28, justify="center",
+                                           font=ctk.CTkFont(size=12, weight="bold"),
+                                           fg_color=COLORS["bg_dark"], border_width=0)
+            license_display.pack(padx=10, pady=(2, 8))
+            license_display.insert(0, existing_license)
+            license_display.configure(state="readonly")  # Make it copyable but not editable
 
         self.license_entry = ctk.CTkEntry(self, width=300, height=45, justify="center",
                                           placeholder_text="XXXX-XXXX-XXXX-XXXX",
                                           font=ctk.CTkFont(size=16))
         self.license_entry.pack(pady=(0, 10))
         self.license_entry.bind("<Return>", lambda e: self.activate())
+
+        # Pre-fill with existing license if available
+        if existing_license:
+            self.license_entry.insert(0, existing_license)
+            self.license_entry.select_range(0, 'end')
 
         self.status_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=11), text_color=COLORS["error"])
         self.status_label.pack(pady=(0, 10))
