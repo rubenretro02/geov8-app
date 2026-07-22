@@ -1,6 +1,16 @@
 ###############################################
-# Geo V9.3.0.7 - Dashboard Application
-# New features in 9.3.0.7:
+# Geo V9.3.0.8 - Dashboard Application
+# New features in 9.3.0.8:
+# - FIX: Stable HWID - a single failed/blank WMIC field can no longer change
+#        the HWID. Once a full reading succeeds it is cached and frozen, so
+#        flaky boots (Win11 24H2 / slow WMIC) never trigger a false reset.
+# - FIX: Fuzzy HWID match - existing activations are recognised via junk-filtered,
+#        legacy and empty-field variants, then silently re-anchored. No mass reset.
+# - FIX: Offline grace - network/server errors no longer delete the local license.
+#        The cached activation is trusted until its real expiry when the server
+#        can't be reached. Licenses are only removed on server-CONFIRMED revocation.
+#
+# Previous (9.3.0.7):
 # - FIX: HWID now retries WMIC commands 3 times before fallback
 # - FIX: Prevents false "License in use on another device" errors
 # - FIX: Added logging for HWID generation debugging
@@ -90,7 +100,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.0.7"
+APP_VERSION = "9.3.0.8"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -323,6 +333,7 @@ LOCAL_CONFIG_PATH = APP_DATA_DIR / "config_local.json"
 STATS_PATH = APP_DATA_DIR / "stats.json"
 HISTORY_PATH = APP_DATA_DIR / "history.json"
 LICENSE_PATH = APP_DATA_DIR / "license_data.json"  # Persistent license storage
+HWID_CACHE_PATH = APP_DATA_DIR / "hwid_cache.json"  # Frozen known-good HWID (stability)
 FIRST_RUN_PATH = APP_DATA_DIR / "first_run.json"  # Track first run for auto-start
 CURRENT_EXE_PATH = APP_DATA_DIR / "current_exe.txt"  # Track current exe location for updates
 
@@ -1163,84 +1174,157 @@ def play_sound(success=True):
             pass
 
 
-def get_hardware_id():
-    """
-    Generate HWID from physical hardware (doesn't change on Windows reset).
+# Placeholder / junk serials that motherboards commonly report. Treated as
+# "blank" so they can never contribute an unstable value to the HWID.
+HW_JUNK_VALUES = {
+    "", "none", "null", "0", "00000000", "default string",
+    "to be filled by o.e.m.", "to be filled by oem", "system serial number",
+    "not applicable", "not specified", "invalid", "unknown", "n/a",
+    "oem", "chassis serial number", "base board serial number",
+}
 
-    v9.3.0.7 FIX: Added retries to WMIC commands to prevent HWID changes
-    when Windows is slow to respond after boot/reset.
 
-    IMPORTANT: Format MUST stay as: f"{bios}-{baseboard}-{uuid}"
-    to maintain compatibility with existing licenses.
-    """
-    def run_wmic(cmd, max_retries=3, retry_delay=2):
-        """Run WMIC command with retries for stability."""
-        for attempt in range(max_retries):
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    shell=True,
-                    timeout=15
-                )
-                lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
-                value = lines[1] if len(lines) > 1 else ""
+def _run_wmic(cmd, max_retries=3, retry_delay=2):
+    """Run a WMIC command with retries for stability."""
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, shell=True, timeout=15
+            )
+            lines = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+            value = lines[1] if len(lines) > 1 else ""
+            if value:
+                print(f"[HWID] {cmd.split()[-1]}: OK")
+                return value
+            if attempt < max_retries - 1:
+                print(f"[HWID] {cmd.split()[-1]}: empty, retry {attempt + 2}/{max_retries}")
+                time.sleep(retry_delay)
+        except subprocess.TimeoutExpired:
+            print(f"[HWID] {cmd.split()[-1]}: timeout, retry {attempt + 2}/{max_retries}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+        except Exception as e:
+            print(f"[HWID] {cmd.split()[-1]}: error ({e})")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+    print(f"[HWID] {cmd.split()[-1]}: FAILED after {max_retries} attempts")
+    return ""
 
-                # If we got a value, return it
-                if value:
-                    print(f"[HWID] {cmd.split()[-1]}: OK")
-                    return value
 
-                # Empty value - retry if we have attempts left
-                if attempt < max_retries - 1:
-                    print(f"[HWID] {cmd.split()[-1]}: empty, retry {attempt + 2}/{max_retries}")
-                    time.sleep(retry_delay)
-
-            except subprocess.TimeoutExpired:
-                print(f"[HWID] {cmd.split()[-1]}: timeout, retry {attempt + 2}/{max_retries}")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-            except Exception as e:
-                print(f"[HWID] {cmd.split()[-1]}: error ({e})")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-
-        print(f"[HWID] {cmd.split()[-1]}: FAILED after {max_retries} attempts")
+def _clean_hw_value(v):
+    """Normalise a hardware serial; junk/placeholder values become blank."""
+    if not v:
         return ""
+    v = " ".join(v.split()).strip()
+    if v.lower() in HW_JUNK_VALUES:
+        return ""
+    return v
 
+
+def _hash_parts(bios, baseboard, system_uuid):
+    # CRITICAL: keep exact same format for compatibility with existing licenses.
+    combined = f"{bios}-{baseboard}-{system_uuid}"
+    return hashlib.sha256(combined.encode()).hexdigest()[:32].upper()
+
+
+def _load_cached_hwid():
     try:
-        # Get hardware IDs with retries
-        bios_serial = run_wmic("wmic bios get serialnumber")
-        baseboard_serial = run_wmic("wmic baseboard get serialnumber")
-        system_uuid = run_wmic("wmic csproduct get uuid")
+        if HWID_CACHE_PATH.exists():
+            with open(HWID_CACHE_PATH, 'r') as f:
+                return (json.load(f).get("hwid") or "").strip() or None
+    except Exception:
+        pass
+    return None
 
-        # CRITICAL: Keep exact same format for compatibility
-        combined = f"{bios_serial}-{baseboard_serial}-{system_uuid}"
 
-        # Only use fallback if ALL three failed
-        if combined == "--":
-            print("[HWID] WARNING: All WMIC failed, using fallback (MAC+processor)")
+def _save_cached_hwid(hwid):
+    try:
+        with open(HWID_CACHE_PATH, 'w') as f:
+            json.dump({"hwid": hwid}, f)
+    except Exception:
+        pass
+
+
+def get_hardware_info():
+    """
+    Return (primary_hwid, candidate_hwids).
+
+    primary_hwid is STABLE: the first time a *complete* hardware reading
+    succeeds it is cached and frozen, so a later boot where a WMIC field is
+    blank/slow can never change it (root cause of the "needs HWID reset" bug).
+
+    candidate_hwids is the set of every HWID this exact machine could
+    legitimately have produced - junk-filtered, raw/legacy, and empty-field
+    variants. It lets us recognise an already-activated device by any of its
+    past fingerprints (fuzzy match, like Windows/OEM activation) and then
+    silently re-anchor it to the stable primary. No mass reset required.
+    """
+    raw_bios = _run_wmic("wmic bios get serialnumber")
+    raw_board = _run_wmic("wmic baseboard get serialnumber")
+    raw_uuid = _run_wmic("wmic csproduct get uuid")
+
+    bios = _clean_hw_value(raw_bios)
+    board = _clean_hw_value(raw_board)
+    uid = _clean_hw_value(raw_uuid)
+
+    candidates = set()
+
+    # Fuzzy combos: each cleaned field is either present or blank. This matches
+    # whatever the machine hashed at activation regardless of which field was
+    # flaky then or now.
+    for b in {bios, ""}:
+        for m in {board, ""}:
+            for u in {uid, ""}:
+                if b or m or u:
+                    candidates.add(_hash_parts(b, m, u))
+
+    # Legacy: exactly how the old code hashed the raw (possibly junk) values.
+    if raw_bios or raw_board or raw_uuid:
+        candidates.add(_hash_parts(raw_bios, raw_board, raw_uuid))
+
+    # Hardware-less fallback (old behaviour) as a candidate.
+    fallback = None
+    if not (bios or board or uid):
+        try:
             machine_id = str(uuid.getnode())
             processor = platform.processor()
-            combined = f"{machine_id}-{processor}"
+            fallback = hashlib.sha256(f"{machine_id}-{processor}".encode()).hexdigest()[:32].upper()
+            candidates.add(fallback)
+            print("[HWID] WARNING: All WMIC blank, using fallback (MAC+processor)")
+        except Exception:
+            pass
 
-        hwid = hashlib.sha256(combined.encode()).hexdigest()[:32].upper()
-        print(f"[HWID] Generated: {hwid}")
-        return hwid
+    cached = _load_cached_hwid()
+    complete = bool(bios and board and uid)
 
-    except Exception as e:
-        print(f"[HWID] Critical error: {e}, using fallback")
-        machine_id = str(uuid.getnode())
-        processor = platform.processor()
-        combined = f"{machine_id}-{processor}"
-        return hashlib.sha256(combined.encode()).hexdigest()[:32].upper()
+    if cached:
+        primary = cached  # frozen - never flips once set
+    else:
+        if bios or board or uid:
+            primary = _hash_parts(bios, board, uid)
+        elif fallback:
+            primary = fallback
+        else:
+            primary = _hash_parts("", "", "")
+        # Only freeze a trustworthy full reading; a partial one stays recomputable
+        # so a later complete boot can set the good cache.
+        if complete:
+            _save_cached_hwid(primary)
+
+    candidates.add(primary)
+    print(f"[HWID] Primary: {primary} ({len(candidates)} candidates)")
+    return primary, sorted(candidates)
+
+
+def get_hardware_id():
+    """Backwards-compatible wrapper: returns the stable primary HWID only."""
+    return get_hardware_info()[0]
 
 
 class SupabaseManager:
     # ... (unchanged, omitted for brevity; see original code above) ...
     def __init__(self):
-        self.hwid = get_hardware_id()
+        self.hwid, self.hwid_candidates = get_hardware_info()
         self.is_licensed = False
         self.license_key = None
         self.agent_name = None
@@ -1273,6 +1357,39 @@ class SupabaseManager:
             return r.status_code in [200, 204]
         except:
             return False
+
+    def _fetch(self, table, params):
+        """Like _get, but distinguishes a reachable server (True, data) from a
+        network/server error (False, None). Needed so an outage is NEVER treated
+        as an invalid license."""
+        try:
+            r = requests.get(f"{self.base_url}/{table}", headers=self.headers, params=params, timeout=10)
+            if r.status_code == 200:
+                return True, r.json()
+            return False, None
+        except:
+            return False, None
+
+    def _hwid_matches(self, server_hwid):
+        """True if the server's stored HWID is any fingerprint of THIS machine."""
+        sh = (server_hwid or "").strip()
+        return bool(sh) and (sh == self.hwid or sh in self.hwid_candidates)
+
+    def _locally_expired(self, local):
+        ea = local.get("expires_at")
+        if not ea:
+            return False
+        try:
+            exp = datetime.fromisoformat(ea.replace('Z', '+00:00'))
+            return exp < datetime.now(exp.tzinfo)
+        except:
+            return False
+
+    def _apply_license(self, license_key, agent_name, expires_at):
+        self.is_licensed = True
+        self.license_key = license_key
+        self.agent_name = agent_name or "Agent"
+        self.days_left = self._calc_days(expires_at)
 
     def _calc_days(self, expires_at):
         if not expires_at:
@@ -1317,75 +1434,96 @@ class SupabaseManager:
             print(f"Error deleting local license: {e}")
 
     def check_license(self):
+        """Validate the license.
+
+        Rules that keep legitimate users from being logged out:
+        - The local license is ONLY deleted on a server-CONFIRMED revocation
+          (deactivated, admin reset, or HWID bound to a genuinely different
+          device). A network/server error never deletes it.
+        - When the server is unreachable, a cached activation is trusted until
+          its real expiry (offline grace).
+        - HWID is matched fuzzily against every fingerprint of this machine and
+          silently re-anchored to the stable primary when it matches a variant.
+        """
         local_license = self._load_license_locally()
+
+        # A) Verify a cached activation against the server.
         if local_license:
+            # Hard stop: expiry is enforced even offline.
+            if self._locally_expired(local_license):
+                return False, "Expired"
+
             license_key = local_license.get("license_key")
-            expires_at = local_license.get("expires_at")
-            if expires_at:
-                try:
-                    exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                    if exp < datetime.now(exp.tzinfo):
-                        return False, "Expired"
-                except:
-                    pass
-            try:
-                result = self._get("licenses", {"license_key": f"eq.{license_key}", "select": "*"})
-                if result and len(result) > 0:
-                    lic = result[0]
-                    if not lic.get("is_active", False):
-                        self._delete_local_license()
-                        return False, "Expired"
-                    server_hwid = lic.get("hwid")
-                    if not server_hwid or not server_hwid.strip():
-                        print("License HWID was reset by admin")
-                        self._delete_local_license()
-                        return False, "Reset"
-                    if server_hwid != self.hwid:
-                        print(f"License HWID mismatch: server={server_hwid}, local={self.hwid}")
-                        self._delete_local_license()
-                        return False, "Missing"
-                    expires_at = lic.get("expires_at")
-                    if expires_at:
-                        exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                        if exp < datetime.now(exp.tzinfo):
-                            return False, "Expired"
-                        self.days_left = self._calc_days(expires_at)
-                    else:
-                        self.days_left = None
-                    self.is_licensed = True
-                    self.license_key = lic.get("license_key")
-                    self.agent_name = lic.get("customer_name") or "Agent"
-                    self._save_license_locally(self.license_key, self.agent_name, expires_at)
-                    return True, self.agent_name
-            except:
-                if local_license.get("agent_name"):
-                    self.is_licensed = True
-                    self.license_key = local_license.get("license_key")
-                    self.agent_name = local_license.get("agent_name")
-                    self.days_left = self._calc_days(local_license.get("expires_at"))
-                    return True, self.agent_name
-        try:
-            result = self._get("licenses", {"hwid": f"eq.{self.hwid}", "select": "*"})
+            ok, result = self._fetch("licenses", {"license_key": f"eq.{license_key}", "select": "*"})
+
+            if not ok:
+                # Server unreachable -> offline grace, trust the cache. Do NOT delete.
+                print("License server unreachable, using offline grace")
+                self._apply_license(local_license.get("license_key"),
+                                    local_license.get("agent_name"),
+                                    local_license.get("expires_at"))
+                return True, self.agent_name
+
             if result and len(result) > 0:
                 lic = result[0]
                 if not lic.get("is_active", False):
-                    return False, "Expired"
+                    self._delete_local_license()
+                    return False, "Deactivated"
+                server_hwid = (lic.get("hwid") or "").strip()
+                if not server_hwid:
+                    print("License HWID was reset by admin")
+                    self._delete_local_license()
+                    return False, "Reset"
+                if not self._hwid_matches(server_hwid):
+                    print(f"License HWID belongs to another device: server={server_hwid}")
+                    self._delete_local_license()
+                    return False, "HWID mismatch"
+                # Matched (possibly via a legacy variant) -> re-anchor to the stable primary.
+                if server_hwid != self.hwid:
+                    print(f"Re-anchoring HWID: {server_hwid} -> {self.hwid}")
+                    self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"})
                 expires_at = lic.get("expires_at")
                 if expires_at:
                     exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                     if exp < datetime.now(exp.tzinfo):
                         return False, "Expired"
-                    self.days_left = self._calc_days(expires_at)
-                else:
-                    self.days_left = None
-                self.is_licensed = True
-                self.license_key = lic.get("license_key")
-                self.agent_name = lic.get("customer_name") or "Agent"
+                self._apply_license(lic.get("license_key"),
+                                    lic.get("customer_name") or "Agent", expires_at)
                 self._save_license_locally(self.license_key, self.agent_name, expires_at)
                 return True, self.agent_name
-            return False, "Missing"
-        except:
-            return False, "Connection error"
+            # Reachable but license_key not found (deleted). Fall through to HWID lookup.
+
+        # B) No usable local activation (fresh install or key deleted): look up by HWID.
+        candidates = ",".join(self.hwid_candidates)
+        ok, result = self._fetch("licenses", {"hwid": f"in.({candidates})", "select": "*"})
+
+        if not ok:
+            # Offline: if we still hold a non-expired local license, keep working.
+            if local_license and not self._locally_expired(local_license):
+                self._apply_license(local_license.get("license_key"),
+                                    local_license.get("agent_name"),
+                                    local_license.get("expires_at"))
+                return True, self.agent_name
+            return False, "Offline"
+
+        if result and len(result) > 0:
+            lic = result[0]
+            if not lic.get("is_active", False):
+                return False, "Deactivated"
+            expires_at = lic.get("expires_at")
+            if expires_at:
+                exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                if exp < datetime.now(exp.tzinfo):
+                    return False, "Expired"
+            # Re-anchor to the stable primary if it was stored under a variant.
+            if (lic.get("hwid") or "").strip() != self.hwid:
+                self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{lic.get('license_key')}"})
+            self._apply_license(lic.get("license_key"),
+                                lic.get("customer_name") or "Agent", expires_at)
+            self._save_license_locally(self.license_key, self.agent_name, expires_at)
+            return True, self.agent_name
+
+        return False, "Missing"
 
     def activate_license(self, license_key):
         try:
@@ -1401,23 +1539,19 @@ class SupabaseManager:
                 exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                 if exp < datetime.now(exp.tzinfo):
                     return False, "Expired"
-            existing_hwid = lic.get("hwid")
-            if existing_hwid and existing_hwid.strip():
-                if existing_hwid != self.hwid:
+            existing_hwid = (lic.get("hwid") or "").strip()
+            if existing_hwid:
+                if not self._hwid_matches(existing_hwid):
                     return False, "License already in use on another device"
-                else:
-                    self.is_licensed = True
-                    self.license_key = license_key
-                    self.agent_name = lic.get("customer_name") or "Agent"
-                    self.days_left = self._calc_days(expires_at)
-                    self._save_license_locally(self.license_key, self.agent_name, expires_at)
-                    return True, self.agent_name
+                # Same machine (exact or legacy variant) -> re-anchor to primary.
+                if existing_hwid != self.hwid:
+                    self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"})
+                self._apply_license(license_key, lic.get("customer_name") or "Agent", expires_at)
+                self._save_license_locally(self.license_key, self.agent_name, expires_at)
+                return True, self.agent_name
             if not self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"}):
                 return False, "Registration failed"
-            self.is_licensed = True
-            self.license_key = license_key
-            self.agent_name = lic.get("customer_name") or "Agent"
-            self.days_left = self._calc_days(expires_at)
+            self._apply_license(license_key, lic.get("customer_name") or "Agent", expires_at)
             self._save_license_locally(self.license_key, self.agent_name, expires_at)
             return True, self.agent_name
         except:
@@ -1620,7 +1754,7 @@ class LicenseDialog(ctk.CTkToplevel):
             pass
 
         # Adjust window size based on whether we have license info to show
-        has_info = existing_license or error_msg in ["Expired", "Reset", "HWID mismatch", "Deactivated"]
+        has_info = existing_license or error_msg in ["Expired", "Reset", "HWID mismatch", "Deactivated", "Offline"]
         window_height = 320 if has_info else 250
         self.geometry(f"400x{window_height}")
 
@@ -1644,6 +1778,9 @@ class LicenseDialog(ctk.CTkToplevel):
         elif error_msg == "Deactivated":
             ctk.CTkLabel(self, text="🚫 License Deactivated", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["error"]).pack(pady=(20, 5))
             ctk.CTkLabel(self, text="Contact support for help", font=ctk.CTkFont(size=12), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
+        elif error_msg == "Offline":
+            ctk.CTkLabel(self, text="📡 No Internet Connection", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["warning"]).pack(pady=(20, 5))
+            ctk.CTkLabel(self, text="Connect to the internet to activate, or enter your key", font=ctk.CTkFont(size=11), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
         elif error_msg == "No license":
             ctk.CTkLabel(self, text="Enter License Key", font=ctk.CTkFont(size=18, weight="bold"), text_color=COLORS["text"]).pack(pady=(30, 20))
         else:
