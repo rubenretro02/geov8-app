@@ -1,6 +1,20 @@
 ###############################################
-# Geo V9.3.1.1 - Dashboard Application
-# New features in 9.3.1.1:
+# Geo V9.3.1.2 - Dashboard Application
+# New features in 9.3.1.2:
+# - NEW: After the auto-close countdown the app keeps running in the
+#        background (window hidden) whenever Auto-Check is ON, so monitoring
+#        never stops. Opening the exe again re-shows that same instance.
+# - NEW: Single-instance guard - launching the app a second time no longer
+#        creates a duplicate process (which meant double checks/alerts).
+# - FIX: Auto-check now also runs when the PC has just booted, even if the
+#        --autostart flag is missing. is_system_just_booted() existed since
+#        9.3.0.1 but was never wired up, so a reset often needed manual Start.
+# - FIX: Registry startup entry is refreshed when it points at an old exe
+#        path, so an update can't silently break auto-start.
+# - FIX: No internet at boot no longer closes the app instantly; it retries
+#        for ~30s first (the network is usually not up yet right after boot).
+#
+# Previous (9.3.1.1):
 # - NEW: Auto-close on successful check - 3 second countdown with a Cancel
 #        button (skipped while periodic auto-check is ON). Navigating to
 #        Details or Settings also cancels the countdown.
@@ -111,7 +125,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.1"
+APP_VERSION = "9.3.1.2"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -345,6 +359,7 @@ STATS_PATH = APP_DATA_DIR / "stats.json"
 HISTORY_PATH = APP_DATA_DIR / "history.json"
 LICENSE_PATH = APP_DATA_DIR / "license_data.json"  # Persistent license storage
 HWID_CACHE_PATH = APP_DATA_DIR / "hwid_cache.json"  # Frozen known-good HWID (stability)
+SHOW_FLAG_PATH = APP_DATA_DIR / "show_window.flag"  # A 2nd launch asks the running app to show itself
 FIRST_RUN_PATH = APP_DATA_DIR / "first_run.json"  # Track first run for auto-start
 CURRENT_EXE_PATH = APP_DATA_DIR / "current_exe.txt"  # Track current exe location for updates
 
@@ -424,6 +439,32 @@ def check_internet_connection():
     return False
 
 
+def acquire_single_instance():
+    """
+    True if this is the only running instance.
+
+    If the app is already running (possibly hidden in the background after an
+    auto-close), drop a flag file asking that instance to show its window and
+    return False so this second launch can exit instead of duplicating checks.
+    """
+    try:
+        ERROR_ALREADY_EXISTS = 183
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\GeoV8App_SingleInstance")
+        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            print("Already running - asking the existing window to show")
+            try:
+                SHOW_FLAG_PATH.write_text("show")
+            except Exception as e:
+                print(f"Could not write show flag: {e}")
+            return False
+        # Keep the handle referenced for the process lifetime
+        globals()["_SINGLE_INSTANCE_MUTEX"] = handle
+        return True
+    except Exception as e:
+        print(f"Single instance check failed ({e}) - continuing")
+        return True
+
+
 def get_startup_folder():
     """Get the Windows Startup folder path"""
     try:
@@ -486,6 +527,29 @@ def is_app_in_startup():
             pass
 
         return False
+    except:
+        return False
+
+
+def startup_entry_is_current():
+    """
+    True if the Registry Run entry points at the exe that is running now.
+    After an update the entry can still point at the old (deleted) exe, which
+    silently breaks auto-start on the next boot.
+    """
+    try:
+        if not getattr(sys, 'frozen', False):
+            return True  # Running as script - nothing to keep in sync
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_READ
+        )
+        try:
+            value, _ = winreg.QueryValueEx(key, "GeoApp")
+        finally:
+            winreg.CloseKey(key)
+        return str(Path(sys.executable).resolve()).lower() in value.lower()
     except:
         return False
 
@@ -587,10 +651,11 @@ def check_and_setup_startup():
         # Check if first run or if not in startup
         first_run = is_first_run()
         in_startup = is_app_in_startup()
+        entry_current = startup_entry_is_current()
 
-        print(f"First run: {first_run}, In startup: {in_startup}")
+        print(f"First run: {first_run}, In startup: {in_startup}, Entry current: {entry_current}")
 
-        if first_run or not in_startup:
+        if first_run or not in_startup or not entry_current:
             print("Adding app to Windows Startup...")
             success, message = add_to_startup()
 
@@ -2001,14 +2066,20 @@ class GeoApp(ctk.CTk):
 
     # ... existing code ... <check_internet_and_continue through check_license methods>
 
-    def check_internet_and_continue(self):
+    def check_internet_and_continue(self, attempt=1):
         def do_check():
             has_internet = check_internet_connection()
-            self.after(0, lambda: self.handle_internet_result(has_internet))
+            self.after(0, lambda: self.handle_internet_result(has_internet, attempt))
         threading.Thread(target=do_check, daemon=True).start()
 
-    def handle_internet_result(self, has_internet):
+    def handle_internet_result(self, has_internet, attempt=1):
         if not has_internet:
+            # Right after a boot the network is usually not up yet - retry
+            # instead of closing, otherwise the app dies before it can check.
+            if attempt < 6:
+                print(f"No internet yet, retry {attempt + 1}/6 in 5s")
+                self.after(5000, lambda: self.check_internet_and_continue(attempt + 1))
+                return
             messagebox.showerror(
                 "No Internet Connection",
                 "This app requires an internet connection to work.\n\n"
@@ -2106,6 +2177,7 @@ class GeoApp(ctk.CTk):
         self.create_widgets()
         self.after(200, self.load_config)
         self.after(1000, self.auto_run_on_boot)
+        self.after(1000, self.watch_show_requests)
 
     def is_system_just_booted(self, max_minutes=3):
         try:
@@ -2119,7 +2191,11 @@ class GeoApp(ctk.CTk):
         # Check if app should auto-run:
         # 1. Started with --autostart argument (from Registry)
         # 2. Running from Startup folder
-        should_auto_run = "--autostart" in sys.argv or is_running_from_startup()
+        # 3. The PC has just booted - covers the case where the Registry entry
+        #    is missing or stale, which used to force a manual Start after a reset
+        should_auto_run = ("--autostart" in sys.argv
+                           or is_running_from_startup()
+                           or self.is_system_just_booted())
 
         if not should_auto_run:
             print("Manual launch - skipping auto-check")
@@ -2382,9 +2458,6 @@ class GeoApp(ctk.CTk):
             self.version_label.pack(side="left", padx=(10, 0))
 
     def start_auto_close_countdown(self):
-        # Skip while periodic auto-check is ON: closing would stop the monitoring loop
-        if hasattr(self, 'auto_switch') and self.auto_switch.get():
-            return
         self.cancel_auto_close()
         self.auto_close_remaining = 3
         self.auto_close_frame.place(relx=0.5, rely=0.97, anchor="s")
@@ -2392,11 +2465,43 @@ class GeoApp(ctk.CTk):
 
     def _tick_auto_close(self):
         if self.auto_close_remaining <= 0:
-            self.destroy()
+            self.finish_auto_close()
             return
         self.auto_close_label.configure(text=f"Closing in {self.auto_close_remaining}s")
         self.auto_close_remaining -= 1
         self.auto_close_job = self.after(1000, self._tick_auto_close)
+
+    def finish_auto_close(self):
+        self.cancel_auto_close()
+        # With Auto-Check ON the monitoring loop must survive: hide the window
+        # instead of destroying it. Opening the exe again re-shows this instance.
+        if hasattr(self, 'auto_switch') and self.auto_switch.get():
+            print("Auto-close: hiding window, monitoring continues")
+            try:
+                self.withdraw()
+            except:
+                pass
+        else:
+            self.destroy()
+
+    def watch_show_requests(self):
+        """Re-show the window when a second launch asks for it."""
+        try:
+            if SHOW_FLAG_PATH.exists():
+                SHOW_FLAG_PATH.unlink()
+                self.restore_window()
+        except:
+            pass
+        self.after(1000, self.watch_show_requests)
+
+    def restore_window(self):
+        self.cancel_auto_close()
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except:
+            pass
 
     def cancel_auto_close(self):
         if getattr(self, 'auto_close_job', None):
@@ -3780,6 +3885,18 @@ After opening, press START in the bot chat."""
 
 
 if __name__ == "__main__":
+    # If the app is already running (possibly hidden), tell that instance to
+    # show itself and exit instead of starting a duplicate.
+    if not acquire_single_instance():
+        sys.exit(0)
+
+    # Ignore a stale flag left by a previous run
+    try:
+        if SHOW_FLAG_PATH.exists():
+            SHOW_FLAG_PATH.unlink()
+    except:
+        pass
+
     # Save current exe path for reliable updates (even if renamed)
     save_current_exe_path()
 
