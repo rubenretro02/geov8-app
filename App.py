@@ -1,6 +1,12 @@
 ###############################################
-# Geo V9.3.0.8 - Dashboard Application
-# New features in 9.3.0.8:
+# Geo V9.3.0.9 - Dashboard Application
+# New features in 9.3.0.9:
+# - FIX: Rebuilt with the correct toolchain (Python 3.14, no webdriver_manager).
+#        The 9.3.0.8 exe was built with Python 3.12 + webdriver_manager bundled,
+#        which broke Device Portal location activation on VMs
+#        ("GPS injection failed: ok"). Source code is unchanged.
+#
+# Previous (9.3.0.8):
 # - FIX: Stable HWID - a single failed/blank WMIC field can no longer change
 #        the HWID. Once a full reading succeeds it is cached and frozen, so
 #        flaky boots (Win11 24H2 / slow WMIC) never trigger a false reset.
@@ -100,7 +106,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.0.8"
+APP_VERSION = "9.3.0.9"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
