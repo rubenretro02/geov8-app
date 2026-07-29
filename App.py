@@ -1,6 +1,11 @@
 ###############################################
-# Geo V9.3.0.9 - Dashboard Application
-# New features in 9.3.0.9:
+# Geo V9.3.1.1 - Dashboard Application
+# New features in 9.3.1.1:
+# - NEW: Auto-close on successful check - 3 second countdown with a Cancel
+#        button (skipped while periodic auto-check is ON). Navigating to
+#        Details or Settings also cancels the countdown.
+#
+# Previous (9.3.0.9):
 # - FIX: Rebuilt with the correct toolchain (Python 3.14, no webdriver_manager).
 #        The 9.3.0.8 exe was built with Python 3.12 + webdriver_manager bundled,
 #        which broke Device Portal location activation on VMs
@@ -106,7 +111,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.0.9"
+APP_VERSION = "9.3.1.1"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -2213,6 +2218,21 @@ class GeoApp(ctk.CTk):
                                       command=self.run_check)
         self.run_btn.pack()
 
+        # Auto-close countdown (hidden until a successful check)
+        self.auto_close_job = None
+        self.auto_close_frame = ctk.CTkFrame(status_container, fg_color="transparent")
+        self.auto_close_label = ctk.CTkLabel(self.auto_close_frame, text="",
+                                             font=ctk.CTkFont(size=11),
+                                             text_color=COLORS["text_secondary"])
+        self.auto_close_label.pack(side="left", padx=(0, 8))
+        self.auto_close_cancel_btn = ctk.CTkButton(self.auto_close_frame, text="✕ Cancel", width=70, height=24,
+                                                   corner_radius=12, fg_color=COLORS["bg_card"],
+                                                   hover_color=COLORS["border"], text_color=COLORS["text"],
+                                                   border_width=1, border_color=COLORS["border"],
+                                                   font=ctk.CTkFont(size=11),
+                                                   command=self.cancel_auto_close)
+        self.auto_close_cancel_btn.pack(side="left")
+
         # Animation state for button dots
         self.btn_animation_id = None
         self.btn_dot_phase = 0
@@ -2340,6 +2360,7 @@ class GeoApp(ctk.CTk):
             self.version_label.pack_forget()
 
     def show_details(self):
+        self.cancel_auto_close()
         self.dashboard_frame.pack_forget()
         self.settings_frame.pack_forget()
         self.details_frame.pack(fill="both", expand=True)
@@ -2350,6 +2371,7 @@ class GeoApp(ctk.CTk):
             self.version_label.pack_forget()
 
     def show_settings(self):
+        self.cancel_auto_close()
         self.dashboard_frame.pack_forget()
         self.details_frame.pack_forget()
         self.settings_frame.pack(fill="both", expand=True)
@@ -2358,6 +2380,30 @@ class GeoApp(ctk.CTk):
         self.details_btn.configure(fg_color=COLORS["bg_card"], text_color=COLORS["text"], border_width=1)
         if hasattr(self, 'version_label'):
             self.version_label.pack(side="left", padx=(10, 0))
+
+    def start_auto_close_countdown(self):
+        # Skip while periodic auto-check is ON: closing would stop the monitoring loop
+        if hasattr(self, 'auto_switch') and self.auto_switch.get():
+            return
+        self.cancel_auto_close()
+        self.auto_close_remaining = 3
+        self.auto_close_frame.place(relx=0.5, rely=0.97, anchor="s")
+        self._tick_auto_close()
+
+    def _tick_auto_close(self):
+        if self.auto_close_remaining <= 0:
+            self.destroy()
+            return
+        self.auto_close_label.configure(text=f"Closing in {self.auto_close_remaining}s")
+        self.auto_close_remaining -= 1
+        self.auto_close_job = self.after(1000, self._tick_auto_close)
+
+    def cancel_auto_close(self):
+        if getattr(self, 'auto_close_job', None):
+            self.after_cancel(self.auto_close_job)
+            self.auto_close_job = None
+        if hasattr(self, 'auto_close_frame'):
+            self.auto_close_frame.place_forget()
 
     def update_status(self, status, msg):
         if status == "ready":
@@ -2873,6 +2919,7 @@ class GeoApp(ctk.CTk):
     def run_check(self):
         if self.is_running:
             return
+        self.cancel_auto_close()
         u = self.username_entry.get().strip()
         p = self.password_entry.get().strip()
 
@@ -3177,6 +3224,7 @@ class GeoApp(ctk.CTk):
                 )
                 self.stats_manager.record_check(True)
                 play_sound(success=True)
+                self.after(0, self.start_auto_close_countdown)
 
             self.update_details()
 
