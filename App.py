@@ -1,6 +1,22 @@
 ###############################################
-# Geo V9.3.1.2 - Dashboard Application
-# New features in 9.3.1.2:
+# Geo V9.3.1.3 - Dashboard Application
+# New features in 9.3.1.3:
+# - NEW: Persistent activation (Windows/OEM style). A license that is active
+#        and not expired NEVER locks the user out because the hardware
+#        fingerprint changed: the app silently re-binds the license to the
+#        machine instead of deleting it and demanding a manager HWID reset.
+#        Entering the key again also just works - no more "already in use".
+#        Only a server-side "deactivated" or a real expiry stops the app.
+# - FIX: The HWID cache is now always frozen once computed. Until now it was
+#        only saved when ALL three WMIC fields were non-empty, so machines
+#        where one field is permanently blank/junk never stabilised and kept
+#        drifting on every launch (the real cause of the repeat lockouts).
+# - NEW: Every device a key is used on is recorded in device_activations, so
+#        the manager can still spot and revoke a shared key (is_active=false).
+# - NEW: Diagnostic log at %APPDATA%/GeoV8/geo.log - the app is windowed, so
+#        until now every print() was lost and field issues were unfalsifiable.
+#
+# Previous (9.3.1.2):
 # - NEW: After the auto-close countdown the app keeps running in the
 #        background (window hidden) whenever Auto-Check is ON, so monitoring
 #        never stops. Opening the exe again re-shows that same instance.
@@ -125,7 +141,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.2"
+APP_VERSION = "9.3.1.3"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -360,6 +376,21 @@ HISTORY_PATH = APP_DATA_DIR / "history.json"
 LICENSE_PATH = APP_DATA_DIR / "license_data.json"  # Persistent license storage
 HWID_CACHE_PATH = APP_DATA_DIR / "hwid_cache.json"  # Frozen known-good HWID (stability)
 SHOW_FLAG_PATH = APP_DATA_DIR / "show_window.flag"  # A 2nd launch asks the running app to show itself
+LOG_PATH = APP_DATA_DIR / "geo.log"  # Diagnostic log (the app is windowed, so print() is invisible)
+
+
+def log_line(message):
+    """Append a diagnostic line. Keeps the file small by trimming when large."""
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 512 * 1024:
+            tail = LOG_PATH.read_text(encoding="utf-8", errors="ignore")[-100_000:]
+            LOG_PATH.write_text(tail, encoding="utf-8")
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {message}\n")
+    except Exception:
+        pass
+    print(message)
 FIRST_RUN_PATH = APP_DATA_DIR / "first_run.json"  # Track first run for auto-start
 CURRENT_EXE_PATH = APP_DATA_DIR / "current_exe.txt"  # Track current exe location for updates
 
@@ -1371,7 +1402,6 @@ def get_hardware_info():
             pass
 
     cached = _load_cached_hwid()
-    complete = bool(bios and board and uid)
 
     if cached:
         primary = cached  # frozen - never flips once set
@@ -1382,13 +1412,16 @@ def get_hardware_info():
             primary = fallback
         else:
             primary = _hash_parts("", "", "")
-        # Only freeze a trustworthy full reading; a partial one stays recomputable
-        # so a later complete boot can set the good cache.
-        if complete:
-            _save_cached_hwid(primary)
+        # Freeze it ALWAYS. Previously this only happened when all three WMIC
+        # fields were non-empty, so machines where one field is permanently
+        # blank/junk never stabilised and drifted on every launch. A frozen
+        # imperfect HWID beats a "correct" one that keeps changing - and if it
+        # ever is wrong, persistent activation re-binds instead of locking out.
+        _save_cached_hwid(primary)
+        log_line(f"[HWID] Frozen new HWID: {primary} (bios={bool(bios)} board={bool(board)} uuid={bool(uid)})")
 
     candidates.add(primary)
-    print(f"[HWID] Primary: {primary} ({len(candidates)} candidates)")
+    log_line(f"[HWID] Primary: {primary} ({len(candidates)} candidates)")
     return primary, sorted(candidates)
 
 
@@ -1446,11 +1479,6 @@ class SupabaseManager:
         except:
             return False, None
 
-    def _hwid_matches(self, server_hwid):
-        """True if the server's stored HWID is any fingerprint of THIS machine."""
-        sh = (server_hwid or "").strip()
-        return bool(sh) and (sh == self.hwid or sh in self.hwid_candidates)
-
     def _locally_expired(self, local):
         ea = local.get("expires_at")
         if not ea:
@@ -1466,6 +1494,32 @@ class SupabaseManager:
         self.license_key = license_key
         self.agent_name = agent_name or "Agent"
         self.days_left = self._calc_days(expires_at)
+
+    def _rebind_hwid(self, license_key, previous_hwid):
+        """
+        Persistent activation: bind this machine to the license.
+
+        A valid (active, unexpired) license must never lock the user out just
+        because the hardware fingerprint moved - that is what forced a manual
+        HWID reset in the manager on every drift.
+        """
+        if self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"}):
+            log_line(f"HWID re-bound for {license_key}: {previous_hwid or '(empty)'} -> {self.hwid}")
+            self._record_device(license_key)
+            return True
+        log_line(f"HWID re-bind FAILED for {license_key} (server refused)")
+        return False
+
+    def _record_device(self, license_key):
+        """Audit trail so the manager can still spot a key used on many devices."""
+        try:
+            self._post("device_activations", {
+                "license_key": license_key,
+                "hardware_id": self.hwid,
+                "device_name": platform.node(),
+            })
+        except Exception:
+            pass
 
     def _calc_days(self, expires_at):
         if not expires_at:
@@ -1512,14 +1566,12 @@ class SupabaseManager:
     def check_license(self):
         """Validate the license.
 
-        Rules that keep legitimate users from being logged out:
-        - The local license is ONLY deleted on a server-CONFIRMED revocation
-          (deactivated, admin reset, or HWID bound to a genuinely different
-          device). A network/server error never deletes it.
-        - When the server is unreachable, a cached activation is trusted until
-          its real expiry (offline grace).
-        - HWID is matched fuzzily against every fingerprint of this machine and
-          silently re-anchored to the stable primary when it matches a variant.
+        Persistent activation, Windows/OEM style - a paying user is never
+        locked out by hardware drift:
+        - Only two things stop the app: the admin deactivated the key, or it
+          really expired. A HWID change just re-binds the license silently.
+        - A network/server error never deletes anything; the cached activation
+          is trusted until its real expiry (offline grace).
         """
         local_license = self._load_license_locally()
 
@@ -1534,7 +1586,7 @@ class SupabaseManager:
 
             if not ok:
                 # Server unreachable -> offline grace, trust the cache. Do NOT delete.
-                print("License server unreachable, using offline grace")
+                log_line("License server unreachable, using offline grace")
                 self._apply_license(local_license.get("license_key"),
                                     local_license.get("agent_name"),
                                     local_license.get("expires_at"))
@@ -1542,27 +1594,23 @@ class SupabaseManager:
 
             if result and len(result) > 0:
                 lic = result[0]
+                # The ONLY things that may stop the app: the admin deactivated
+                # the key, or it genuinely expired. Everything else self-heals.
                 if not lic.get("is_active", False):
+                    log_line(f"License {license_key} deactivated by admin")
                     self._delete_local_license()
                     return False, "Deactivated"
-                server_hwid = (lic.get("hwid") or "").strip()
-                if not server_hwid:
-                    print("License HWID was reset by admin")
-                    self._delete_local_license()
-                    return False, "Reset"
-                if not self._hwid_matches(server_hwid):
-                    print(f"License HWID belongs to another device: server={server_hwid}")
-                    self._delete_local_license()
-                    return False, "HWID mismatch"
-                # Matched (possibly via a legacy variant) -> re-anchor to the stable primary.
-                if server_hwid != self.hwid:
-                    print(f"Re-anchoring HWID: {server_hwid} -> {self.hwid}")
-                    self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"})
                 expires_at = lic.get("expires_at")
                 if expires_at:
                     exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                     if exp < datetime.now(exp.tzinfo):
                         return False, "Expired"
+                # Persistent activation: whatever HWID the server holds (empty
+                # after an admin reset, a legacy variant, or a drifted one), the
+                # machine simply re-claims the license instead of being locked out.
+                server_hwid = (lic.get("hwid") or "").strip()
+                if server_hwid != self.hwid:
+                    self._rebind_hwid(license_key, server_hwid)
                 self._apply_license(lic.get("license_key"),
                                     lic.get("customer_name") or "Agent", expires_at)
                 self._save_license_locally(self.license_key, self.agent_name, expires_at)
@@ -1615,18 +1663,13 @@ class SupabaseManager:
                 exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                 if exp < datetime.now(exp.tzinfo):
                     return False, "Expired"
+            # Persistent activation: an active, unexpired key always activates on
+            # the machine in front of us. Re-binding replaces the old manual
+            # "HWID reset in the manager" step that this used to require.
             existing_hwid = (lic.get("hwid") or "").strip()
-            if existing_hwid:
-                if not self._hwid_matches(existing_hwid):
-                    return False, "License already in use on another device"
-                # Same machine (exact or legacy variant) -> re-anchor to primary.
-                if existing_hwid != self.hwid:
-                    self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"})
-                self._apply_license(license_key, lic.get("customer_name") or "Agent", expires_at)
-                self._save_license_locally(self.license_key, self.agent_name, expires_at)
-                return True, self.agent_name
-            if not self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{license_key}"}):
-                return False, "Registration failed"
+            if existing_hwid != self.hwid:
+                if not self._rebind_hwid(license_key, existing_hwid):
+                    return False, "Registration failed"
             self._apply_license(license_key, lic.get("customer_name") or "Agent", expires_at)
             self._save_license_locally(self.license_key, self.agent_name, expires_at)
             return True, self.agent_name
