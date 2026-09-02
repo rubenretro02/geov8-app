@@ -1,0 +1,3 @@
+# NEVER commit the private key
+*.pfx
+password.txt
