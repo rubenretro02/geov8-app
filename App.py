@@ -1,6 +1,13 @@
 ###############################################
-# Geo V9.3.1.3 - Dashboard Application
-# New features in 9.3.1.3:
+# Geo V9.3.1.4 - Dashboard Application
+# New features in 9.3.1.4:
+# - NEW: "Run auto-checks hidden" setting. When ON, checks started by the
+#        system (boot / interval) run without showing the window; it only
+#        appears if a check fails. Manual launches show the UI as always.
+# - NEW: License key is masked everywhere (first 4 + last 4 chars only), so a
+#        user can't read and leak a full key from Settings or the dialog.
+#
+# Previous (9.3.1.3):
 # - NEW: Persistent activation (Windows/OEM style). A license that is active
 #        and not expired NEVER locks the user out because the hardware
 #        fingerprint changed: the app silently re-binds the license to the
@@ -141,7 +148,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.3"
+APP_VERSION = "9.3.1.4"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -391,6 +398,27 @@ def log_line(message):
     except Exception:
         pass
     print(message)
+
+
+def mask_license(key):
+    """Show only the first 4 and last 4 characters, e.g. 6ZWN•••••••••••NUNV."""
+    if not key:
+        return ""
+    k = str(key).strip()
+    if len(k) <= 8:
+        return k
+    return f"{k[:4]}{'•' * (len(k) - 8)}{k[-4:]}"
+
+
+def local_config_value(key, default=None):
+    """Read one setting from the local config file (fast, no network)."""
+    try:
+        if LOCAL_CONFIG_PATH.exists():
+            with open(LOCAL_CONFIG_PATH, "r") as f:
+                return json.load(f).get(key, default)
+    except Exception:
+        pass
+    return default
 FIRST_RUN_PATH = APP_DATA_DIR / "first_run.json"  # Track first run for auto-start
 CURRENT_EXE_PATH = APP_DATA_DIR / "current_exe.txt"  # Track current exe location for updates
 
@@ -1908,29 +1936,22 @@ class LicenseDialog(ctk.CTkToplevel):
             if error_msg:
                 ctk.CTkLabel(self, text=error_msg, font=ctk.CTkFont(size=11), text_color=COLORS["text_secondary"]).pack(pady=(0, 10))
 
-        # Show existing license for support (copyable)
+        # Show existing license for support - MASKED, so a user can't read and
+        # leak a full key. First 4 + last 4 is enough to find it in the manager.
+        self.existing_license = existing_license
         if existing_license:
             info_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
             info_frame.pack(fill="x", padx=30, pady=(5, 10))
             ctk.CTkLabel(info_frame, text="Your license:", font=ctk.CTkFont(size=10),
                         text_color=COLORS["text_secondary"]).pack(anchor="w", padx=10, pady=(5, 0))
-            license_display = ctk.CTkEntry(info_frame, width=260, height=28, justify="center",
-                                           font=ctk.CTkFont(size=12, weight="bold"),
-                                           fg_color=COLORS["bg_dark"], border_width=0)
-            license_display.pack(padx=10, pady=(2, 8))
-            license_display.insert(0, existing_license)
-            license_display.configure(state="readonly")  # Make it copyable but not editable
+            ctk.CTkLabel(info_frame, text=mask_license(existing_license),
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(padx=10, pady=(2, 8))
 
         self.license_entry = ctk.CTkEntry(self, width=300, height=45, justify="center",
                                           placeholder_text="XXXX-XXXX-XXXX-XXXX",
                                           font=ctk.CTkFont(size=16))
         self.license_entry.pack(pady=(0, 10))
         self.license_entry.bind("<Return>", lambda e: self.activate())
-
-        # Pre-fill with existing license if available
-        if existing_license:
-            self.license_entry.insert(0, existing_license)
-            self.license_entry.select_range(0, 'end')
 
         self.status_label = ctk.CTkLabel(self, text="", font=ctk.CTkFont(size=11), text_color=COLORS["error"])
         self.status_label.pack(pady=(0, 10))
@@ -1942,7 +1963,9 @@ class LicenseDialog(ctk.CTkToplevel):
         self.activate_btn.pack(pady=10)
 
     def activate(self):
-        license_key = self.license_entry.get().strip()
+        # Empty box + a saved key = retry with the saved key (it is no longer
+        # pre-filled, to keep the full key off the screen).
+        license_key = self.license_entry.get().strip() or (self.existing_license or "")
         if not license_key:
             self.status_label.configure(text="Enter license key")
             return
@@ -2088,6 +2111,14 @@ class GeoApp(ctk.CTk):
         self.geometry("700x650")
         self.minsize(650, 600)
 
+        # Hidden auto-checks: when Windows launched us at boot and the user
+        # chose to run auto-checks hidden, never show the window unless a
+        # check fails. Read from the local file so it applies before any UI.
+        self.launched_by_autostart = "--autostart" in sys.argv or is_running_from_startup()
+        if self.launched_by_autostart and local_config_value("silent_auto_check", False):
+            log_line("Silent auto-check: starting hidden")
+            self.withdraw()
+
         # Theme state
         self.is_dark_mode = True
         self.update_theme()
@@ -2179,6 +2210,7 @@ class GeoApp(ctk.CTk):
             self.check_license()
 
     def show_update_dialog(self, update_info):
+        self.restore_window()  # a dialog needs a visible parent
         dialog = UpdateDialog(self, update_info, self.auto_updater)
         self.wait_window(dialog)
         if not dialog.updating:
@@ -2187,6 +2219,7 @@ class GeoApp(ctk.CTk):
     def check_license(self):
         is_valid, message = self.supabase.check_license()
         if not is_valid:
+            self.restore_window()  # a dialog needs a visible parent
             dialog = LicenseDialog(self, self.supabase, message)
             self.wait_window(dialog)
             if dialog.activated:
@@ -2255,7 +2288,7 @@ class GeoApp(ctk.CTk):
             if use_auto_coords:
                 # Auto GPS mode - only need username and password
                 if all([u, p]):
-                    self.run_check()
+                    self.run_check(auto=True)
                 else:
                     print("Auto-check skipped: missing username/password")
             else:
@@ -2263,7 +2296,7 @@ class GeoApp(ctk.CTk):
                 lat_s = self.lat_entry.get().strip()
                 lon_s = self.lon_entry.get().strip()
                 if all([u, p, lat_s, lon_s]):
-                    self.run_check()
+                    self.run_check(auto=True)
                 else:
                     print("Auto-check skipped: missing configuration")
         except Exception as e:
@@ -2435,13 +2468,13 @@ class GeoApp(ctk.CTk):
 
         def run_and_schedule():
             if self.auto_switch.get() and not self.is_running:
-                self.run_check()
+                self.run_check(auto=True)
                 self.next_check_time = datetime.now() + __import__('datetime').timedelta(minutes=self.auto_interval)
             if self.auto_switch.get():
                 self.auto_check_job = self.after(interval_ms, run_and_schedule)
 
         if not self.is_running:
-            self.run_check()
+            self.run_check(auto=True)
         self.next_check_time = datetime.now() + __import__('datetime').timedelta(minutes=self.auto_interval)
         self.auto_check_job = self.after(interval_ms, run_and_schedule)
         self.countdown_job = self.after(1000, self.update_countdown)
@@ -2545,6 +2578,14 @@ class GeoApp(ctk.CTk):
             self.focus_force()
         except:
             pass
+
+    def _show_if_silent_failure(self):
+        """Hidden auto-check: the window stays hidden unless the check fails."""
+        if (getattr(self, 'current_check_auto', False)
+                and hasattr(self, 'silent_auto_check_var')
+                and self.silent_auto_check_var.get()):
+            log_line("Silent auto-check failed - showing window")
+            self.after(0, self.restore_window)
 
     def cancel_auto_close(self):
         if getattr(self, 'auto_close_job', None):
@@ -2717,6 +2758,8 @@ class GeoApp(ctk.CTk):
                     self.alert_on_fail_var.set(config.get("alert_on_fail", True))
                 if hasattr(self, 'alert_on_success_var'):
                     self.alert_on_success_var.set(config.get("alert_on_success", False))
+                if hasattr(self, 'silent_auto_check_var'):
+                    self.silent_auto_check_var.set(config.get("silent_auto_check", False))
             except Exception as e:
                 print(f"Error loading alert filters: {e}")
 
@@ -2740,6 +2783,7 @@ class GeoApp(ctk.CTk):
                 "alert_gps": self.alert_gps_var.get() if hasattr(self, 'alert_gps_var') else True,
                 "alert_on_fail": self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True,
                 "alert_on_success": self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False,
+                "silent_auto_check": self.silent_auto_check_var.get() if hasattr(self, 'silent_auto_check_var') else False,
             }
             self.allowed_countries = countries
             self.allowed_states = states
@@ -3064,9 +3108,12 @@ class GeoApp(ctk.CTk):
 
         return True, None
 
-    def run_check(self):
+    def run_check(self, auto=False):
         if self.is_running:
             return
+        # auto=True for checks started by the system (boot / interval), so a
+        # failure can bring the window back when auto-checks run hidden.
+        self.current_check_auto = auto
         self.cancel_auto_close()
         u = self.username_entry.get().strip()
         p = self.password_entry.get().strip()
@@ -3126,6 +3173,7 @@ class GeoApp(ctk.CTk):
             """Handle critical system errors - these ALWAYS send alerts (not filtered by IP/GPS)"""
             self.current_data["status"] = "error"
             self.update_status("error", msg)
+            self._show_if_silent_failure()
             self.update_details()
             self.send_notification("Error", msg)
             self.supabase.log_check(ip, ip_loc, gps_loc, "error", msg)
@@ -3287,6 +3335,7 @@ class GeoApp(ctk.CTk):
             if errors:
                 self.current_data["status"] = "error"
                 self.update_status("error", errors[0][:60])
+                self._show_if_silent_failure()
                 self.send_notification("Location Error", errors[0])
                 agent_chat_ids = self.telegram_chat_ids.get().strip() if self.telegram_switch.get() else ""
 
@@ -3407,7 +3456,7 @@ class GeoApp(ctk.CTk):
         ctk.CTkLabel(info, text=f"Version: {APP_VERSION}", font=ctk.CTkFont(size=10),
                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=16)
         if hasattr(self, 'supabase') and self.supabase.license_key:
-            ctk.CTkLabel(info, text=f"License Key: {self.supabase.license_key}", font=ctk.CTkFont(size=10),
+            ctk.CTkLabel(info, text=f"License Key: {mask_license(self.supabase.license_key)}", font=ctk.CTkFont(size=10),
                         text_color=COLORS["text_secondary"]).pack(anchor="w", padx=16)
         if hasattr(self, 'supabase') and self.supabase.hwid:
             ctk.CTkLabel(info, text=f"HWID: {self.supabase.hwid[:20]}...", font=ctk.CTkFont(size=10),
@@ -3437,6 +3486,13 @@ class GeoApp(ctk.CTk):
         self.interval_entry.insert(0, "5")
         ctk.CTkLabel(auto_config, text="min", text_color=COLORS["text_secondary"],
                     font=ctk.CTkFont(size=11)).pack(side="left", padx=(5, 0))
+
+        self.silent_auto_check_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(auto_sec, text="Run auto-checks hidden (show window only if a check fails)",
+                        variable=self.silent_auto_check_var,
+                        font=ctk.CTkFont(size=11), checkbox_width=20, checkbox_height=20,
+                        fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"]
+                        ).pack(anchor="w", padx=16, pady=(0, 8))
 
         self.countdown_label = ctk.CTkLabel(auto_sec, text="", font=ctk.CTkFont(size=10),
                                             text_color=COLORS["text_secondary"])
