@@ -8,6 +8,9 @@
 #        re-read before every check, so a change applies without restarting.
 # - FIX: Empty allowed-countries / allowed-states lists mean "no restriction"
 #        instead of failing every check with "not allowed".
+# - FIX: After an auto-update the relaunched app keeps --autostart, so it
+#        stays hidden and runs the auto-check instead of opening the UI as a
+#        manual launch.
 #
 # Previous (9.3.1.5):
 # - FIX: Settings no longer revert after a restart. save_config sent the
@@ -1200,7 +1203,11 @@ class AutoUpdater:
             batch_content.append(f'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "GeoApp" /t REG_SZ /d "\\"{primary_exe_path}\\"" /f >nul 2>&1')
             batch_content.append("")
             batch_content.append("echo [4/5] Starting new version...")
-            batch_content.append(f'start "" "{primary_exe_path}"')
+            # Keep the auto-start context across an update: without the flag the
+            # relaunched exe thinks it was opened by hand, shows the UI and skips
+            # the auto-check ("Manual launch - skipping auto-check").
+            relaunch_args = " --autostart" if "--autostart" in sys.argv else ""
+            batch_content.append(f'start "" "{primary_exe_path}"{relaunch_args}')
             batch_content.append("timeout /t 2 /nobreak >nul")
             batch_content.append("")
             batch_content.append("echo [5/5] Cleanup...")
