@@ -14,8 +14,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$sec = ConvertTo-SecureString -String $Password -Force -AsPlainText
-$cert = Get-PfxCertificate -FilePath $Pfx -Password $sec
+# X509Certificate2 constructor works in Windows PowerShell 5.1;
+# Get-PfxCertificate -Password is PowerShell 7+ only.
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($Pfx, $Password, 'Exportable,PersistKeySet')
 
 $timestamps = @('http://timestamp.digicert.com', 'http://timestamp.sectigo.com')
 
