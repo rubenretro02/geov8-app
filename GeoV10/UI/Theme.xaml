@@ -1,0 +1,144 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Same palette as COLORS_DARK in the Python app -->
+    <SolidColorBrush x:Key="BgDark" Color="#0a0a0f"/>
+    <SolidColorBrush x:Key="BgCard" Color="#12121a"/>
+    <SolidColorBrush x:Key="BgCardHover" Color="#1a1a25"/>
+    <SolidColorBrush x:Key="Accent" Color="#00d4aa"/>
+    <SolidColorBrush x:Key="AccentEnd" Color="#00a080"/>
+    <SolidColorBrush x:Key="Success" Color="#10b981"/>
+    <SolidColorBrush x:Key="Error" Color="#ef4444"/>
+    <SolidColorBrush x:Key="Warning" Color="#f59e0b"/>
+    <SolidColorBrush x:Key="Text" Color="#ffffff"/>
+    <SolidColorBrush x:Key="TextSecondary" Color="#71717a"/>
+    <SolidColorBrush x:Key="Border" Color="#27272a"/>
+
+    <!-- No Foreground here: an implicit TextBlock style would also repaint the
+         text inside buttons. Windows set Foreground once and TextBlocks inherit it. -->
+    <Style TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="Segoe UI"/>
+    </Style>
+
+    <Style x:Key="Secondary" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+        <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+        <Setter Property="FontSize" Value="11"/>
+    </Style>
+
+    <Style x:Key="SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Margin" Value="16,12,16,8"/>
+    </Style>
+
+    <Style x:Key="Card" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource BgCard}"/>
+        <Setter Property="CornerRadius" Value="12"/>
+        <Setter Property="Margin" Value="0,0,0,10"/>
+    </Style>
+
+    <!-- Rounded flat button used for nav (square) and primary actions (pill) -->
+    <Style x:Key="FlatButton" TargetType="Button">
+        <Setter Property="Background" Value="{StaticResource BgCard}"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="FontFamily" Value="Segoe UI"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}, FallbackValue=8}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Bd" Property="Opacity" Value="0.6"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource FlatButton}">
+        <Setter Property="Background" Value="{StaticResource Accent}"/>
+        <Setter Property="Foreground" Value="#000000"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="FontSize" Value="15"/>
+        <Setter Property="Tag" Value="22"/>
+    </Style>
+
+    <Style x:Key="NavButton" TargetType="Button" BasedOn="{StaticResource FlatButton}">
+        <Setter Property="Width" Value="40"/>
+        <Setter Property="Height" Value="35"/>
+        <Setter Property="Margin" Value="3,0"/>
+        <Setter Property="FontSize" Value="16"/>
+        <Setter Property="Tag" Value="8"/>
+    </Style>
+
+    <Style TargetType="TextBox">
+        <Setter Property="Background" Value="#1a1a25"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CaretBrush" Value="{StaticResource Text}"/>
+        <Setter Property="Padding" Value="6,4"/>
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="Height" Value="28"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="PasswordBox">
+        <Setter Property="Background" Value="#1a1a25"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CaretBrush" Value="{StaticResource Text}"/>
+        <Setter Property="Padding" Value="6,4"/>
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="Height" Value="28"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="PasswordBox">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="Margin" Value="16,0,16,8"/>
+    </Style>
+
+    <Style TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="FontSize" Value="11"/>
+    </Style>
+
+    <Style x:Key="Field" TargetType="Grid">
+        <Setter Property="Margin" Value="16,2,16,2"/>
+    </Style>
+
+</ResourceDictionary>
