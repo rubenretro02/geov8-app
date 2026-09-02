@@ -17,15 +17,17 @@ public sealed class AppConfig
     [JsonPropertyName("allowed_countries")] public List<string> AllowedCountries { get; set; } = new(AppInfo.DefaultAllowedCountries);
     [JsonPropertyName("allowed_states")] public List<string> AllowedStates { get; set; } = new(AppInfo.DefaultAllowedStates);
     [JsonPropertyName("service_interval"), JsonConverter(typeof(LenientStringConverter))] public string ServiceInterval { get; set; } = "5";
-    [JsonPropertyName("telegram_enabled")] public bool TelegramEnabled { get; set; }
+    // Bools use the lenient converter: the Python app saved CTkSwitch.get() values,
+    // which are 0/1 integers, so existing files have numbers where bools go.
+    [JsonPropertyName("telegram_enabled"), JsonConverter(typeof(LenientBoolConverter))] public bool TelegramEnabled { get; set; }
     [JsonPropertyName("telegram_chat_ids"), JsonConverter(typeof(LenientStringConverter))] public string TelegramChatIds { get; set; } = "";
-    [JsonPropertyName("gps_mode")] public string GpsMode { get; set; } = "custom";
-    [JsonPropertyName("alert_ip")] public bool AlertIp { get; set; } = true;
-    [JsonPropertyName("alert_gps")] public bool AlertGps { get; set; } = true;
-    [JsonPropertyName("alert_on_fail")] public bool AlertOnFail { get; set; } = true;
-    [JsonPropertyName("alert_on_success")] public bool AlertOnSuccess { get; set; }
+    [JsonPropertyName("gps_mode"), JsonConverter(typeof(LenientStringConverter))] public string GpsMode { get; set; } = "custom";
+    [JsonPropertyName("alert_ip"), JsonConverter(typeof(LenientBoolConverter))] public bool AlertIp { get; set; } = true;
+    [JsonPropertyName("alert_gps"), JsonConverter(typeof(LenientBoolConverter))] public bool AlertGps { get; set; } = true;
+    [JsonPropertyName("alert_on_fail"), JsonConverter(typeof(LenientBoolConverter))] public bool AlertOnFail { get; set; } = true;
+    [JsonPropertyName("alert_on_success"), JsonConverter(typeof(LenientBoolConverter))] public bool AlertOnSuccess { get; set; }
     /// <summary>Local-only: auto-checks run hidden unless this is on.</summary>
-    [JsonPropertyName("show_on_auto_check")] public bool ShowOnAutoCheck { get; set; }
+    [JsonPropertyName("show_on_auto_check"), JsonConverter(typeof(LenientBoolConverter))] public bool ShowOnAutoCheck { get; set; }
 
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
 
@@ -87,6 +89,24 @@ public sealed class AppConfig
         ["alert_on_fail"] = AlertOnFail,
         ["alert_on_success"] = AlertOnSuccess,
     };
+}
+
+/// <summary>Reads a bool that may have been stored as 0/1, "true"/"false" or null.</summary>
+public sealed class LenientBoolConverter : JsonConverter<bool>
+{
+    public override bool Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        reader.TokenType switch
+        {
+            JsonTokenType.True => true,
+            JsonTokenType.False => false,
+            JsonTokenType.Null => false,
+            JsonTokenType.Number => reader.TryGetDouble(out var d) && d != 0,
+            JsonTokenType.String => (reader.GetString() ?? "").Trim().ToLowerInvariant() is "true" or "1" or "yes" or "on",
+            _ => throw new JsonException($"Unexpected token {reader.TokenType} for bool"),
+        };
+
+    public override void Write(Utf8JsonWriter writer, bool value, JsonSerializerOptions options) =>
+        writer.WriteBooleanValue(value);
 }
 
 /// <summary>Reads a string property that may have been stored as a number/bool by an older version.</summary>

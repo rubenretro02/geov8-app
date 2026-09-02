@@ -154,6 +154,9 @@ public partial class MainWindow : Window
         SetNav(DetailsBtn);
     }
 
+    /// <summary>Used by the UI_PREVIEW build to land on Settings so loaded values can be checked.</summary>
+    public void OpenSettings() => ShowSettings(this, new RoutedEventArgs());
+
     private void ShowSettings(object sender, RoutedEventArgs e)
     {
         CancelAutoClose();
