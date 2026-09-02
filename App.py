@@ -1,6 +1,15 @@
 ###############################################
-# Geo V9.3.1.5 - Dashboard Application
-# New features in 9.3.1.5:
+# Geo V9.3.1.6 - Dashboard Application
+# New features in 9.3.1.6:
+# - NEW: Location rules from the manager. A license can carry its own
+#        allowed countries/states with "lock_location_settings" on: the app
+#        then enforces those lists and the fields are locked for the user -
+#        only the admin / creator changes them in the manager. Rules are
+#        re-read before every check, so a change applies without restarting.
+# - FIX: Empty allowed-countries / allowed-states lists mean "no restriction"
+#        instead of failing every check with "not allowed".
+#
+# Previous (9.3.1.5):
 # - FIX: Settings no longer revert after a restart. save_config sent the
 #        local-only key show_on_auto_check to the configurations table, which
 #        has no such column, so PostgREST rejected the whole row (silently)
@@ -157,7 +166,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.5"
+APP_VERSION = "9.3.1.6"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -1475,6 +1484,10 @@ class SupabaseManager:
         self.license_key = None
         self.agent_name = None
         self.days_left = None
+        # Location rules pushed from the manager (per license)
+        self.location_locked = False
+        self.enforced_countries = []
+        self.enforced_states = []
         self.headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -1531,6 +1544,29 @@ class SupabaseManager:
         self.license_key = license_key
         self.agent_name = agent_name or "Agent"
         self.days_left = self._calc_days(expires_at)
+
+    def _apply_location_rules(self, lic):
+        """Location rules set in the manager for this license. With
+        lock_location_settings on, the app enforces these lists and the user
+        can't edit them - only the admin / creator can, in the manager."""
+        self.location_locked = bool(lic.get("lock_location_settings"))
+        c = lic.get("allowed_countries")
+        s = lic.get("allowed_states")
+        self.enforced_countries = [x for x in c if x] if isinstance(c, list) else []
+        self.enforced_states = [x for x in s if x] if isinstance(s, list) else []
+        if self.location_locked:
+            log_line(f"Location rules enforced by manager: countries={self.enforced_countries} states={self.enforced_states}")
+
+    def refresh_location_rules(self):
+        """Re-read the rules so a change made in the manager applies on the next check."""
+        if not self.license_key:
+            return
+        ok, result = self._fetch("licenses", {
+            "license_key": f"eq.{self.license_key}",
+            "select": "lock_location_settings,allowed_countries,allowed_states",
+        })
+        if ok and result:
+            self._apply_location_rules(result[0])
 
     def _rebind_hwid(self, license_key, previous_hwid):
         """
@@ -1642,6 +1678,7 @@ class SupabaseManager:
                     exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                     if exp < datetime.now(exp.tzinfo):
                         return False, "Expired"
+                self._apply_location_rules(lic)
                 # Persistent activation: whatever HWID the server holds (empty
                 # after an admin reset, a legacy variant, or a drifted one), the
                 # machine simply re-claims the license instead of being locked out.
@@ -1676,6 +1713,7 @@ class SupabaseManager:
                 exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                 if exp < datetime.now(exp.tzinfo):
                     return False, "Expired"
+            self._apply_location_rules(lic)
             # Re-anchor to the stable primary if it was stored under a variant.
             if (lic.get("hwid") or "").strip() != self.hwid:
                 self._patch("licenses", {"hwid": self.hwid}, {"license_key": f"eq.{lic.get('license_key')}"})
@@ -1700,6 +1738,7 @@ class SupabaseManager:
                 exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
                 if exp < datetime.now(exp.tzinfo):
                     return False, "Expired"
+            self._apply_location_rules(lic)
             # Persistent activation: an active, unexpired key always activates on
             # the machine in front of us. Re-binding replaces the old manual
             # "HWID reset in the manager" step that this used to require.
@@ -2797,10 +2836,36 @@ class GeoApp(ctk.CTk):
             except Exception as e:
                 print(f"Error loading alert filters: {e}")
 
+        self.apply_location_rules()
+
+    def apply_location_rules(self):
+        """Enforce manager-pushed lists (and lock the fields), or hand control back."""
+        if not hasattr(self, 'countries_entry') or not hasattr(self, 'location_lock_label'):
+            return
+        if self.supabase.location_locked:
+            self.allowed_countries = list(self.supabase.enforced_countries)
+            self.allowed_states = list(self.supabase.enforced_states)
+            for box, values in ((self.countries_entry, self.allowed_countries),
+                                (self.states_entry, self.allowed_states)):
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.insert("1.0", ", ".join(values))
+                box.configure(state="disabled")
+            self.location_lock_label.configure(text="🔒 Set by your manager - contact them to change it")
+        else:
+            self.countries_entry.configure(state="normal")
+            self.states_entry.configure(state="normal")
+            self.location_lock_label.configure(text="")
+
     def save_config(self):
         try:
-            countries = [c.strip() for c in self.countries_entry.get("1.0", "end").strip().split(",") if c.strip()]
-            states = [s.strip() for s in self.states_entry.get("1.0", "end").strip().split(",") if s.strip()]
+            if self.supabase.location_locked:
+                # Manager-enforced lists win; the boxes are locked anyway
+                countries = list(self.supabase.enforced_countries)
+                states = list(self.supabase.enforced_states)
+            else:
+                countries = [c.strip() for c in self.countries_entry.get("1.0", "end").strip().split(",") if c.strip()]
+                states = [s.strip() for s in self.states_entry.get("1.0", "end").strip().split(",") if s.strip()]
             config = {
                 "username": self.username_entry.get().strip(),
                 "password": self.password_entry.get().strip(),
@@ -3131,9 +3196,11 @@ class GeoApp(ctk.CTk):
 
             return False
 
-        country_ok = any(matches_country(c, country) for c in self.allowed_countries)
-        if not country_ok:
-            return False, "country"
+        # An empty list means "no restriction" - it must not fail every check
+        if self.allowed_countries:
+            country_ok = any(matches_country(c, country) for c in self.allowed_countries)
+            if not country_ok:
+                return False, "country"
 
         if self.allowed_states:
             state_ok = any(matches_state(s, state) for s in self.allowed_states)
@@ -3236,6 +3303,13 @@ class GeoApp(ctk.CTk):
             )
 
         try:
+            # Pick up location rules changed in the manager since startup
+            self.supabase.refresh_location_rules()
+            if self.supabase.location_locked:
+                self.allowed_countries = list(self.supabase.enforced_countries)
+                self.allowed_states = list(self.supabase.enforced_states)
+            self.after(0, self.apply_location_rules)
+
             update_progress(5)
 
             if use_auto_coords:
@@ -3588,6 +3662,9 @@ class GeoApp(ctk.CTk):
         co = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=12)
         co.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(co, text="Allowed Countries", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=16, pady=(12, 4))
+        self.location_lock_label = ctk.CTkLabel(co, text="", font=ctk.CTkFont(size=10),
+                                                text_color=COLORS["warning"])
+        self.location_lock_label.pack(anchor="w", padx=16, pady=(0, 4))
         self.countries_entry = ctk.CTkTextbox(co, height=40, corner_radius=6, fg_color=COLORS["bg_dark"], font=ctk.CTkFont(size=11))
         self.countries_entry.pack(fill="x", padx=16, pady=(0, 12))
 
