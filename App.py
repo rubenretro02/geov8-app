@@ -1,6 +1,13 @@
 ###############################################
-# Geo V9.3.1.6 - Dashboard Application
-# New features in 9.3.1.6:
+# Geo V9.3.1.7 - Dashboard Application
+# New features in 9.3.1.7:
+# - NEW: Fast startup. Registers a Scheduled Task with an "At log on" trigger
+#        (no delay, no time limit), which is NOT subject to the Run-key
+#        startup throttle Windows applies to registry-launched apps - that
+#        throttle was the ~10 minute delay after boot. The Run key stays as a
+#        fallback; the single-instance guard prevents a double launch.
+#
+# Previous (9.3.1.6):
 # - NEW: Location rules from the manager. A license can carry its own
 #        allowed countries/states with "lock_location_settings" on: the app
 #        then enforces those lists and the fields are locked for the user -
@@ -169,7 +176,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.6"
+APP_VERSION = "9.3.1.7"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -687,6 +694,75 @@ def add_to_startup():
         return False, str(e)
 
 
+SCHEDULED_TASK_NAME = "GeoAppLogon"
+
+
+def setup_scheduled_task():
+    """
+    Register an 'At log on' Scheduled Task so the app starts as early as
+    possible after boot. Registry Run entries are throttled by Explorer after
+    logon (the ~10 minute delay reported on VMs); a logon-triggered task runs
+    right away, like a VNC/proxy service. Created for the current user, no
+    elevation needed. Idempotent: /F overwrites, so a new exe path is picked up.
+    """
+    try:
+        if not getattr(sys, 'frozen', False):
+            return False
+        exe = os.path.abspath(sys.executable)
+        # ONLOGON, no delay; disable the "stop if runs too long" limit; keep
+        # running on battery (VMs report as on-battery on some hosts).
+        xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Geo auto-start</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>false</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>"{exe}"</Command><Arguments>--autostart</Arguments></Exec></Actions>
+</Task>'''
+        tmp = APP_DATA_DIR / "geo_task.xml"
+        tmp.write_text(xml, encoding="utf-16")
+        r = subprocess.run(
+            ["schtasks", "/Create", "/TN", SCHEDULED_TASK_NAME, "/XML", str(tmp), "/F"],
+            capture_output=True, text=True, shell=True, timeout=15
+        )
+        try:
+            tmp.unlink()
+        except:
+            pass
+        if r.returncode == 0:
+            log_line(f"Scheduled task '{SCHEDULED_TASK_NAME}' registered (fast startup)")
+            return True
+        log_line(f"Scheduled task registration failed: {r.stderr.strip() or r.stdout.strip()}")
+        return False
+    except Exception as e:
+        log_line(f"setup_scheduled_task error: {e}")
+        return False
+
+
+def scheduled_task_is_current():
+    """True if the logon task exists and points at the exe running now."""
+    try:
+        if not getattr(sys, 'frozen', False):
+            return True
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", SCHEDULED_TASK_NAME, "/XML"],
+            capture_output=True, text=True, shell=True, timeout=15
+        )
+        if r.returncode != 0:
+            return False
+        return os.path.abspath(sys.executable).lower() in r.stdout.lower()
+    except:
+        return False
+
+
 def is_first_run():
     """Check if this is the first time the app is running"""
     try:
@@ -732,8 +808,9 @@ def check_and_setup_startup():
         first_run = is_first_run()
         in_startup = is_app_in_startup()
         entry_current = startup_entry_is_current()
+        task_current = scheduled_task_is_current()
 
-        print(f"First run: {first_run}, In startup: {in_startup}, Entry current: {entry_current}")
+        print(f"First run: {first_run}, In startup: {in_startup}, Entry current: {entry_current}, Task current: {task_current}")
 
         if first_run or not in_startup or not entry_current:
             print("Adding app to Windows Startup...")
@@ -744,6 +821,10 @@ def check_and_setup_startup():
                 print(f"Startup setup complete: {message}")
             else:
                 print(f"Startup setup failed: {message}")
+
+        # Fast-startup scheduled task (avoids the Run-key logon throttle)
+        if first_run or not task_current:
+            setup_scheduled_task()
     except Exception as e:
         print(f"check_and_setup_startup error: {e}")
 
