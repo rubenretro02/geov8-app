@@ -1,6 +1,14 @@
 ###############################################
-# Geo V9.3.1.4 - Dashboard Application
-# New features in 9.3.1.4:
+# Geo V9.3.1.5 - Dashboard Application
+# New features in 9.3.1.5:
+# - FIX: Settings no longer revert after a restart. save_config sent the
+#        local-only key show_on_auto_check to the configurations table, which
+#        has no such column, so PostgREST rejected the whole row (silently)
+#        and load_config - which prefers the server copy - restored the old
+#        values. Only real columns are sent now, and local-only settings are
+#        overlaid on top of the server row when loading.
+#
+# Previous (9.3.1.4):
 # - NEW: Auto-checks (boot / interval) now run HIDDEN by default; the window
 #        only appears if a check fails. A "Show on auto check" setting turns
 #        the window back on for those who want to watch it. Manual launches
@@ -149,7 +157,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.4"
+APP_VERSION = "9.3.1.5"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -1714,16 +1722,30 @@ class SupabaseManager:
         except:
             return None
 
+    # Columns that exist in the configurations table. PostgREST rejects the
+    # whole row on an unknown key, so anything else (e.g. show_on_auto_check)
+    # must stay local-only or every settings save silently fails.
+    CONFIG_COLUMNS = {
+        "username", "password", "latitude", "longitude", "allowed_countries",
+        "allowed_states", "service_interval", "telegram_enabled",
+        "telegram_chat_ids", "gps_mode", "alert_ip", "alert_gps",
+        "alert_on_fail", "alert_on_success",
+    }
+
     def save_config(self, config_data):
         if not self.is_licensed:
             return False
         try:
-            config_data["hardware_id"] = self.hwid
+            row = {k: v for k, v in config_data.items() if k in self.CONFIG_COLUMNS}
+            row["hardware_id"] = self.hwid
             existing = self._get("configurations", {"hardware_id": f"eq.{self.hwid}"})
             if existing and len(existing) > 0:
-                return self._patch("configurations", config_data, {"hardware_id": f"eq.{self.hwid}"})
+                ok = self._patch("configurations", row, {"hardware_id": f"eq.{self.hwid}"})
             else:
-                return self._post("configurations", config_data)
+                ok = self._post("configurations", row)
+            if not ok:
+                log_line("Config save to server FAILED (local copy kept)")
+            return ok
         except:
             return False
 
@@ -2708,6 +2730,16 @@ class GeoApp(ctk.CTk):
             try:
                 with open(LOCAL_CONFIG_PATH, "r") as f:
                     config = json.load(f)
+            except:
+                pass
+        elif config and LOCAL_CONFIG_PATH.exists():
+            # Settings that only live locally (show_on_auto_check) are not in
+            # the server row - overlay them so they survive a restart.
+            try:
+                with open(LOCAL_CONFIG_PATH, "r") as f:
+                    for k, v in json.load(f).items():
+                        if k not in config:
+                            config[k] = v
             except:
                 pass
 
