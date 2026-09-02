@@ -1,9 +1,10 @@
 ###############################################
 # Geo V9.3.1.4 - Dashboard Application
 # New features in 9.3.1.4:
-# - NEW: "Run auto-checks hidden" setting. When ON, checks started by the
-#        system (boot / interval) run without showing the window; it only
-#        appears if a check fails. Manual launches show the UI as always.
+# - NEW: Auto-checks (boot / interval) now run HIDDEN by default; the window
+#        only appears if a check fails. A "Show on auto check" setting turns
+#        the window back on for those who want to watch it. Manual launches
+#        show the UI as always.
 # - NEW: License key is masked everywhere (first 4 + last 4 chars only), so a
 #        user can't read and leak a full key from Settings or the dialog.
 #
@@ -2111,12 +2112,13 @@ class GeoApp(ctk.CTk):
         self.geometry("700x650")
         self.minsize(650, 600)
 
-        # Hidden auto-checks: when Windows launched us at boot and the user
-        # chose to run auto-checks hidden, never show the window unless a
-        # check fails. Read from the local file so it applies before any UI.
+        # Auto-checks run hidden by default: when Windows launched us at boot,
+        # never show the window unless a check fails - or the user turned on
+        # "Show on auto check". Read from the local file so it applies before
+        # any UI is built (no flash).
         self.launched_by_autostart = "--autostart" in sys.argv or is_running_from_startup()
-        if self.launched_by_autostart and local_config_value("silent_auto_check", False):
-            log_line("Silent auto-check: starting hidden")
+        if self.launched_by_autostart and not local_config_value("show_on_auto_check", False):
+            log_line("Auto-check: starting hidden")
             self.withdraw()
 
         # Theme state
@@ -2582,9 +2584,9 @@ class GeoApp(ctk.CTk):
     def _show_if_silent_failure(self):
         """Hidden auto-check: the window stays hidden unless the check fails."""
         if (getattr(self, 'current_check_auto', False)
-                and hasattr(self, 'silent_auto_check_var')
-                and self.silent_auto_check_var.get()):
-            log_line("Silent auto-check failed - showing window")
+                and hasattr(self, 'show_on_auto_check_var')
+                and not self.show_on_auto_check_var.get()):
+            log_line("Hidden auto-check failed - showing window")
             self.after(0, self.restore_window)
 
     def cancel_auto_close(self):
@@ -2758,8 +2760,8 @@ class GeoApp(ctk.CTk):
                     self.alert_on_fail_var.set(config.get("alert_on_fail", True))
                 if hasattr(self, 'alert_on_success_var'):
                     self.alert_on_success_var.set(config.get("alert_on_success", False))
-                if hasattr(self, 'silent_auto_check_var'):
-                    self.silent_auto_check_var.set(config.get("silent_auto_check", False))
+                if hasattr(self, 'show_on_auto_check_var'):
+                    self.show_on_auto_check_var.set(config.get("show_on_auto_check", False))
             except Exception as e:
                 print(f"Error loading alert filters: {e}")
 
@@ -2783,7 +2785,7 @@ class GeoApp(ctk.CTk):
                 "alert_gps": self.alert_gps_var.get() if hasattr(self, 'alert_gps_var') else True,
                 "alert_on_fail": self.alert_on_fail_var.get() if hasattr(self, 'alert_on_fail_var') else True,
                 "alert_on_success": self.alert_on_success_var.get() if hasattr(self, 'alert_on_success_var') else False,
-                "silent_auto_check": self.silent_auto_check_var.get() if hasattr(self, 'silent_auto_check_var') else False,
+                "show_on_auto_check": self.show_on_auto_check_var.get() if hasattr(self, 'show_on_auto_check_var') else False,
             }
             self.allowed_countries = countries
             self.allowed_states = states
@@ -3487,9 +3489,10 @@ class GeoApp(ctk.CTk):
         ctk.CTkLabel(auto_config, text="min", text_color=COLORS["text_secondary"],
                     font=ctk.CTkFont(size=11)).pack(side="left", padx=(5, 0))
 
-        self.silent_auto_check_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(auto_sec, text="Run auto-checks hidden (show window only if a check fails)",
-                        variable=self.silent_auto_check_var,
+        # OFF by default: auto-checks run hidden unless the user opts in to see them
+        self.show_on_auto_check_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(auto_sec, text="Show on auto check",
+                        variable=self.show_on_auto_check_var,
                         font=ctk.CTkFont(size=11), checkbox_width=20, checkbox_height=20,
                         fg_color=COLORS["accent"], hover_color=COLORS["accent_gradient_end"]
                         ).pack(anchor="w", padx=16, pady=(0, 8))
