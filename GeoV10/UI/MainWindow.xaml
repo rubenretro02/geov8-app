@@ -29,6 +29,8 @@
                 <ui:AnimatedCircle x:Name="Circle" Grid.RowSpan="2" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,0,40"/>
                 <Button x:Name="RunBtn" Grid.Row="1" Content="▶  Start" Style="{StaticResource PrimaryButton}" Width="140" Height="45"
                         VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,10" Click="Run_Click"/>
+                <TextBlock x:Name="StatusMessage" Grid.Row="2" Text="" HorizontalAlignment="Center" VerticalAlignment="Top"
+                           TextAlignment="Center" TextWrapping="Wrap" Margin="24,0,24,0" FontSize="12"/>
                 <StackPanel x:Name="AutoClosePanel" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,8" Visibility="Collapsed">
                     <TextBlock x:Name="AutoCloseLabel" Style="{StaticResource Secondary}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                     <Button Content="✕ Cancel" Style="{StaticResource FlatButton}" Tag="12" Width="70" Height="24" FontSize="11" Click="CancelAutoClose_Click"/>
@@ -141,16 +143,19 @@
                             <RadioButton x:Name="GpsAutoRadio" Content="Use IP coords" GroupName="gps" Margin="0,0,15,0" Checked="GpsMode_Changed"/>
                             <RadioButton x:Name="GpsCustomRadio" Content="Custom" GroupName="gps" IsChecked="True" Checked="GpsMode_Changed"/>
                         </StackPanel>
-                        <Grid Style="{StaticResource Field}">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                            <TextBlock Text="Latitude" Style="{StaticResource Secondary}" VerticalAlignment="Center"/>
-                            <TextBox x:Name="LatBox" Grid.Column="1"/>
-                        </Grid>
-                        <Grid Style="{StaticResource Field}" Margin="16,2,16,12">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="70"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                            <TextBlock Text="Longitude" Style="{StaticResource Secondary}" VerticalAlignment="Center"/>
-                            <TextBox x:Name="LonBox" Grid.Column="1"/>
-                        </Grid>
+                        <!-- Only shown in Custom mode; hidden entirely for "Use IP coords" -->
+                        <StackPanel x:Name="CoordFields">
+                            <Grid Style="{StaticResource Field}">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="80"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Latitude" Style="{StaticResource Secondary}" VerticalAlignment="Center"/>
+                                <TextBox x:Name="LatBox" Grid.Column="1"/>
+                            </Grid>
+                            <Grid Style="{StaticResource Field}" Margin="16,2,16,12">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="80"/><ColumnDefinition/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Longitude" Style="{StaticResource Secondary}" VerticalAlignment="Center"/>
+                                <TextBox x:Name="LonBox" Grid.Column="1"/>
+                            </Grid>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 

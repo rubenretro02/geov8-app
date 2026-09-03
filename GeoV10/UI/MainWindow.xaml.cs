@@ -203,10 +203,9 @@ public partial class MainWindow : Window
 
     private void GpsMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (LatBox == null) return;
-        var custom = GpsCustomRadio.IsChecked == true;
-        LatBox.IsEnabled = custom;
-        LonBox.IsEnabled = custom;
+        // Use IP coords -> hide lat/lon entirely; Custom -> show them (not greyed)
+        if (CoordFields == null) return;
+        CoordFields.Visibility = GpsCustomRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // ------------------------------------------------------------ navigation
@@ -405,12 +404,13 @@ public partial class MainWindow : Window
 
         _isRunning = true;
         UpdateStatus("running");
+        SetStatusMessage("Starting...", B("TextSecondary"));
 
         // WebView2 must run on the UI thread; the rest of the pipeline is async I/O
         Func<string, Task<bool>> activate = url => Dispatcher.InvokeAsync(() => LocationActivator.ActivateAsync(url)).Task.Unwrap();
         var runner = new CheckRunner(_license, _data, _config, activate);
         runner.Progress += p => Dispatcher.InvokeAsync(() => Circle.SetProgress(p));
-        runner.Status += s => Log.Line($"[check] {s}");
+        runner.Status += s => Dispatcher.InvokeAsync(() => { Log.Line($"[check] {s}"); SetStatusMessage(s, B("TextSecondary")); });
 
         CheckResult result;
         try { result = await runner.RunAsync(lat, lon, useAuto); }
@@ -421,6 +421,8 @@ public partial class MainWindow : Window
         UpdateDetails();
         try { if (result.Success) SystemSounds.Asterisk.Play(); else SystemSounds.Hand.Play(); } catch { }
         Log.Line(result.Success ? "Check OK: Ready to work!" : $"Check FAILED: {string.Join(" | ", result.Errors)}");
+        SetStatusMessage(result.Success ? "Ready to work!" : result.Message,
+                         result.Success ? B("Success") : B("Error"));
 
         var location = $"{_data.City}, {_data.State}";
         Stats.Record(result.Success);
@@ -491,6 +493,12 @@ public partial class MainWindow : Window
     }
 
     private void StopDots() { _dotsTimer.Stop(); RunBtn.Content = "▶  Start"; }
+
+    private void SetStatusMessage(string text, Brush color)
+    {
+        StatusMessage.Text = text;
+        StatusMessage.Foreground = color;
+    }
 
     private void UpdateDetails()
     {
