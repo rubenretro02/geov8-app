@@ -170,6 +170,31 @@
                     </StackPanel>
                 </Border>
 
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <Grid Margin="16,12,16,4">
+                            <TextBlock Text="Telegram Notifications" FontSize="14" FontWeight="Bold"/>
+                            <CheckBox x:Name="TelegramEnabled" Content="On" HorizontalAlignment="Right" Margin="0"/>
+                        </Grid>
+                        <Button Content="+ Connect Telegram" Style="{StaticResource FlatButton}" Tag="8" Height="34"
+                                Margin="16,4,16,8" Background="{StaticResource AccentEnd}" Foreground="White" BorderThickness="0"
+                                Click="ConnectTelegram_Click"/>
+                        <TextBlock Text="Chat IDs (comma-separated)" Style="{StaticResource Secondary}" Margin="16,0"/>
+                        <TextBox x:Name="TelegramChatIds" Margin="16,2,16,10"/>
+
+                        <TextBlock Text="WHEN TO NOTIFY:" Foreground="{StaticResource Warning}" FontSize="10" FontWeight="Bold" Margin="16,0,16,4"/>
+                        <StackPanel Orientation="Horizontal" Margin="16,0,16,8">
+                            <CheckBox x:Name="AlertOnSuccess" Content="On success" Margin="0,0,20,0"/>
+                            <CheckBox x:Name="AlertOnFail" Content="On failure" Margin="0"/>
+                        </StackPanel>
+                        <TextBlock Text="ALERT FOR THESE ISSUES:" Foreground="{StaticResource Warning}" FontSize="10" FontWeight="Bold" Margin="16,0,16,4"/>
+                        <StackPanel Orientation="Horizontal" Margin="16,0,16,12">
+                            <CheckBox x:Name="AlertIp" Content="IP location" Margin="0,0,20,0"/>
+                            <CheckBox x:Name="AlertGps" Content="GPS coords" Margin="0"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
                 <Button Content="💾  Save Settings" Style="{StaticResource PrimaryButton}" Height="42" Margin="0,4,0,20" Click="Save_Click"/>
             </StackPanel>
         </ScrollViewer>
