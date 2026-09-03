@@ -1,6 +1,13 @@
 ###############################################
-# Geo V9.3.1.7 - Dashboard Application
-# New features in 9.3.1.7:
+# Geo V9.3.1.8 - Dashboard Application
+# New features in 9.3.1.8:
+# - NEW: Remove the Run-key startup delay (StartupDelayInMSec=0, a per-user
+#        non-admin write), so the Run-key launch fires immediately at logon
+#        instead of waiting out Explorer's startup throttle. The Scheduled
+#        Task from 9.3.1.7 is still faster but needs admin to create; this
+#        speeds up the common non-elevated case.
+#
+# Previous (9.3.1.7):
 # - NEW: Fast startup. Registers a Scheduled Task with an "At log on" trigger
 #        (no delay, no time limit), which is NOT subject to the Run-key
 #        startup throttle Windows applies to registry-launched apps - that
@@ -176,7 +183,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.7"
+APP_VERSION = "9.3.1.8"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -697,6 +704,23 @@ def add_to_startup():
 SCHEDULED_TASK_NAME = "GeoAppLogon"
 
 
+def remove_run_key_startup_delay():
+    """
+    Explorer delays Run-key startup apps after logon (StartupDelayInMSec).
+    Set it to 0 - a per-user, non-admin write - so the Run-key launch fires
+    immediately. The Scheduled Task is earlier still but needs admin to create.
+    """
+    try:
+        key = winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize"
+        )
+        winreg.SetValueEx(key, "StartupDelayInMSec", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+    except Exception as e:
+        log_line(f"remove_run_key_startup_delay error: {e}")
+
+
 def setup_scheduled_task():
     """
     Register an 'At log on' Scheduled Task so the app starts as early as
@@ -822,7 +846,9 @@ def check_and_setup_startup():
             else:
                 print(f"Startup setup failed: {message}")
 
-        # Fast-startup scheduled task (avoids the Run-key logon throttle)
+        # Remove the Run-key logon delay (non-admin), and register the faster
+        # Scheduled Task when we can (task creation needs admin).
+        remove_run_key_startup_delay()
         if first_run or not task_current:
             setup_scheduled_task()
     except Exception as e:
