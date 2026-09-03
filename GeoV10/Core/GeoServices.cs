@@ -15,7 +15,8 @@ public static class GeoServices
 
     private static HttpClient CreateClient()
     {
-        var c = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        // 8s: a stalled geocode/IP provider fails over to the next one fast
+        var c = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
         c.DefaultRequestHeaders.UserAgent.ParseAdd("GeoApp/8.33");
         return c;
     }

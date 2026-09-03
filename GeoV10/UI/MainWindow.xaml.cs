@@ -51,7 +51,9 @@ public partial class MainWindow : Window
         try { AutoStart.Ensure(); } catch (Exception e) { Log.Line($"AutoStart.Ensure: {e.Message}"); }
         _showFlagTimer.Start();
 
-        if (AutoStart.LaunchedByAutostart || AutoStart.IsSystemJustBooted())
+        // Only a real auto-start runs the boot check - not a manual open soon
+        // after boot (that used to fire a background check + auto-close).
+        if (AutoStart.LaunchedByAutostart)
         {
             ReadConfigFromUi();
             var haveCreds = _config.Username.Length > 0 && _config.Password.Length > 0
