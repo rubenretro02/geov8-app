@@ -14,7 +14,12 @@ public partial class App : Application
         if (!SingleInstance.Acquire()) { Shutdown(); return; }
         SingleInstance.ClearStaleFlag();
 
-        Log.Line($"=== Geo {AppInfo.Version} (C#) starting  autostart={AutoStart.LaunchedByAutostart} uptime={AutoStart.UptimeMinutes:F1}m ===");
+        // Robust "did the machine just boot into us" signal - consumed once so a
+        // later manual re-open this boot is NOT treated as a boot launch.
+        var firstThisBoot = BootSession.IsFirstLaunchThisBoot();
+        var bootLaunch = AutoStart.LaunchedByAutostart || firstThisBoot;
+
+        Log.Line($"=== Geo {AppInfo.Version} (C#) starting  autostart={AutoStart.LaunchedByAutostart} firstThisBoot={firstThisBoot} uptime={AutoStart.UptimeMinutes:F1}m ===");
 
         try
         {
@@ -28,7 +33,7 @@ public partial class App : Application
                 if (previewHidden) preview.Hide();
                 await preview.InitializeAppAsync();
                 if (Environment.GetEnvironmentVariable("GEOV10_PREVIEW_PAGE") == "settings") preview.OpenSettings();
-                preview.OnStartupComplete(previewHidden);
+                preview.OnStartupComplete(previewHidden, previewHidden);
                 return;
             }
 #endif
@@ -39,6 +44,14 @@ public partial class App : Application
                 MessageBox.Show(
                     "This app requires an internet connection to work.\n\nPlease check your connection and try again.",
                     "No Internet Connection", MessageBoxButton.OK, MessageBoxImage.Error);
+                Shutdown();
+                return;
+            }
+
+            // Self-update before anything is shown. If an update is applied, the
+            // updater kills+replaces+relaunches this exe, so we just exit.
+            if (await Updater.CheckAndApplyAsync(relaunchWithAutostart: bootLaunch))
+            {
                 Shutdown();
                 return;
             }
@@ -57,21 +70,24 @@ public partial class App : Application
             MainWindow = main;
             ShutdownMode = ShutdownMode.OnMainWindowClose;
 
-            // Auto-checks run hidden by default: when Windows launched us at boot
-            // and the user didn't turn on "Show on auto check", start hidden - the
-            // window only appears if a check fails or a second launch asks for it.
-            var startHidden = AutoStart.LaunchedByAutostart
-                              && !(AppConfig.LoadLocal()?.ShowOnAutoCheck ?? false);
+            // Auto-checks run hidden by default: on a boot launch with "Show on
+            // auto check" off, start hidden - unless there are no credentials yet
+            // (a fresh install must show the UI so it can be configured).
+            var cfg = AppConfig.LoadLocal();
+            var showOnAuto = cfg?.ShowOnAutoCheck ?? false;
+            var hasCreds = cfg != null && cfg.Username.Length > 0 && cfg.Password.Length > 0
+                && (cfg.GpsMode == "auto" || (cfg.Latitude.Length > 0 && cfg.Longitude.Length > 0));
+            var startHidden = bootLaunch && !showOnAuto && hasCreds;
 
             main.Show();
             if (startHidden)
             {
-                Log.Line("Auto-check: starting hidden");
+                Log.Line("Boot launch, Show-on-auto-check off -> starting hidden");
                 main.Hide();
             }
 
             await main.InitializeAppAsync();
-            main.OnStartupComplete(startHidden);
+            main.OnStartupComplete(startHidden, bootLaunch);
         }
         catch (Exception ex)
         {

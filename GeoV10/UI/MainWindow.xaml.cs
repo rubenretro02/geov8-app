@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     private int _dotPhase;
     private int _autoCloseRemaining;
     private bool _startedHidden;
+    private TrayIcon? _tray;
 
     private Brush B(string key) => (Brush)FindResource(key);
 
@@ -44,23 +45,37 @@ public partial class MainWindow : Window
 
     /// <summary>Called once after the window is shown/hidden: register startup, watch for
     /// show-requests from a second launch, and run the boot/auto-start check.</summary>
-    public void OnStartupComplete(bool startedHidden)
+    public void OnStartupComplete(bool startedHidden, bool bootLaunch)
     {
-        Log.Line($"OnStartupComplete(startedHidden={startedHidden})");
+        Log.Line($"OnStartupComplete(startedHidden={startedHidden}, bootLaunch={bootLaunch})");
         _startedHidden = startedHidden;
+        _tray = new TrayIcon(onShow: RestoreWindow, onExit: ExitApp);
         try { AutoStart.Ensure(); } catch (Exception e) { Log.Line($"AutoStart.Ensure: {e.Message}"); }
         _showFlagTimer.Start();
 
-        // Only a real auto-start runs the boot check - not a manual open soon
-        // after boot (that used to fire a background check + auto-close).
-        if (AutoStart.LaunchedByAutostart)
+        // Only a real boot launch runs the check (robust via BootSession: covers
+        // a stale/removed Run key, and never phantom-checks a manual re-open).
+        if (bootLaunch)
         {
             ReadConfigFromUi();
             var haveCreds = _config.Username.Length > 0 && _config.Password.Length > 0
                 && (_config.GpsMode == "auto" || (_config.Latitude.Length > 0 && _config.Longitude.Length > 0));
-            if (haveCreds) { Log.Line("Auto-start detected - running check"); RunCheck(auto: true); }
+            if (haveCreds) { Log.Line("Boot launch - running check"); RunCheck(auto: true); }
             else Log.Line("Auto-check skipped: missing configuration");
         }
+    }
+
+    private void ExitApp()
+    {
+        _tray?.Dispose();
+        _tray = null;
+        Application.Current.Shutdown();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _tray?.Dispose();
+        base.OnClosed(e);
     }
 
     // ------------------------------------------------------------ startup
@@ -106,6 +121,12 @@ public partial class MainWindow : Window
         StatesBox.Text = string.Join(", ", _config.AllowedStates);
         IntervalBox.Text = string.IsNullOrWhiteSpace(_config.ServiceInterval) ? "5" : _config.ServiceInterval;
         ShowOnAutoCheck.IsChecked = _config.ShowOnAutoCheck;
+        TelegramEnabled.IsChecked = _config.TelegramEnabled;
+        TelegramChatIds.Text = _config.TelegramChatIds;
+        AlertOnSuccess.IsChecked = _config.AlertOnSuccess;
+        AlertOnFail.IsChecked = _config.AlertOnFail;
+        AlertIp.IsChecked = _config.AlertIp;
+        AlertGps.IsChecked = _config.AlertGps;
         if (_config.GpsMode == "auto") GpsAutoRadio.IsChecked = true; else GpsCustomRadio.IsChecked = true;
         GpsMode_Changed(this, new RoutedEventArgs());
         ApplyLocationRules();
@@ -142,6 +163,27 @@ public partial class MainWindow : Window
         _config.ServiceInterval = string.IsNullOrWhiteSpace(IntervalBox.Text) ? "5" : IntervalBox.Text.Trim();
         _config.GpsMode = GpsAutoRadio.IsChecked == true ? "auto" : "custom";
         _config.ShowOnAutoCheck = ShowOnAutoCheck.IsChecked == true;
+        _config.TelegramEnabled = TelegramEnabled.IsChecked == true;
+        _config.TelegramChatIds = TelegramChatIds.Text.Trim();
+        _config.AlertOnSuccess = AlertOnSuccess.IsChecked == true;
+        _config.AlertOnFail = AlertOnFail.IsChecked == true;
+        _config.AlertIp = AlertIp.IsChecked == true;
+        _config.AlertGps = AlertGps.IsChecked == true;
+    }
+
+    private async void ConnectTelegram_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new TelegramConnectWindow(_license.Hwid) { Owner = this };
+        dlg.ShowDialog();
+        if (dlg.Connected)
+        {
+            TelegramEnabled.IsChecked = true;
+            _tray?.Notify("Telegram", "Account connected", true);
+            // Persist so alerts start flowing without a manual Save
+            ReadConfigFromUi();
+            _config.SaveLocal();
+            await _license.SaveRemoteConfigAsync(_config.ToServerRow(_license.Hwid));
+        }
     }
 
     private async void Save_Click(object sender, RoutedEventArgs e)
@@ -380,8 +422,53 @@ public partial class MainWindow : Window
         try { if (result.Success) SystemSounds.Asterisk.Play(); else SystemSounds.Hand.Play(); } catch { }
         Log.Line(result.Success ? "Check OK: Ready to work!" : $"Check FAILED: {string.Join(" | ", result.Errors)}");
 
+        var location = $"{_data.City}, {_data.State}";
+        Stats.Record(result.Success);
+        History.Record(result.Success ? "success" : "error", _data.Ip, location,
+            result.Success ? "Ready to work!" : string.Join(" | ", result.Errors));
+        if (result.Success) _tray?.Notify("Ready to work!", location, true);
+        else _tray?.Notify("Location Error", result.Errors.Count > 0 ? result.Errors[0] : result.Message, false);
+
+        _ = SendTelegramAsync(result);
+
         if (result.Success) StartAutoCloseCountdown();
         else ShowIfSilentFailure();
+    }
+
+    /// <summary>Telegram alert with the same error-type detection and filters as the Python app.</summary>
+    private async Task SendTelegramAsync(CheckResult result)
+    {
+        try
+        {
+            var chatIds = _config.TelegramEnabled ? _config.TelegramChatIds : "";
+            var location = $"{_data.City}, {_data.State}";
+
+            if (result.Success)
+            {
+                await Telegram.SendAlertAsync(_license.LicenseKey, "success", _data.Ip, location,
+                    "Ready to work!", chatIds, null,
+                    _config.AlertIp, _config.AlertGps, _config.AlertOnFail, _config.AlertOnSuccess);
+                return;
+            }
+
+            string errorType;
+            if (result.SystemError)
+            {
+                errorType = "system";
+            }
+            else
+            {
+                var text = string.Join(" | ", result.Errors).ToLowerInvariant();
+                var hasIp = text.Contains("ip:") || text.Contains("ip location") || _data.IpValid == false;
+                var hasGps = text.Contains("gps") || text.Contains("coordinate") || _data.CoordValid == false;
+                errorType = hasIp && hasGps ? "both" : hasIp ? "ip" : hasGps ? "gps" : "system";
+            }
+
+            await Telegram.SendAlertAsync(_license.LicenseKey, "error", _data.Ip, location,
+                string.Join(" | ", result.Errors), chatIds, errorType,
+                _config.AlertIp, _config.AlertGps, _config.AlertOnFail, _config.AlertOnSuccess);
+        }
+        catch (Exception e) { Log.Line($"SendTelegram error: {e.Message}"); }
     }
 
     private void UpdateStatus(string status)

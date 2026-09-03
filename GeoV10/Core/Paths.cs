@@ -23,4 +23,8 @@ public static class Paths
     public static string WebView2Data => Path.Combine(AppData, "webview2");
     public static string ShowFlag => Path.Combine(AppData, "show_window.flag");
     public static string TaskXml => Path.Combine(AppData, "geo_task.xml");
+    public static string Stats => Path.Combine(AppData, "stats.json");
+    public static string History => Path.Combine(AppData, "history.json");
+    public static string BootMarker => Path.Combine(AppData, "boot_session.json");
+    public static string UpdateDir => Path.Combine(AppData, "update");
 }

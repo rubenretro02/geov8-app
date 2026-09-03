@@ -1,0 +1,27 @@
+<Window x:Class="GeoV10.UI.TelegramConnectWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Connect Telegram" Width="420" Height="360" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource BgDark}" Foreground="{StaticResource Text}">
+    <StackPanel Margin="24,18">
+        <TextBlock Text="📱 Connect Telegram" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,4"/>
+        <TextBlock Text="Open the link in Telegram and press Start to receive alerts."
+                   Style="{StaticResource Secondary}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,0,0,14"/>
+
+        <Border Style="{StaticResource Card}" CornerRadius="8" Padding="12,10">
+            <StackPanel>
+                <TextBlock Text="Your link:" Style="{StaticResource Secondary}" FontSize="10"/>
+                <TextBox x:Name="LinkBox" IsReadOnly="True" Margin="0,4,0,0" Height="30"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+                    <Button x:Name="CopyBtn" Content="📋 Copy Link" Style="{StaticResource FlatButton}" Tag="8" Width="120" Height="34" Margin="0,0,8,0" Click="Copy_Click"/>
+                    <Button x:Name="OpenBtn" Content="Open Telegram" Style="{StaticResource PrimaryButton}" Width="130" Height="34" Click="Open_Click"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <TextBlock x:Name="StatusText" HorizontalAlignment="Center" Margin="0,16,0,0" FontSize="12"
+                   Foreground="{StaticResource Warning}" Text="Generating link..."/>
+        <Button x:Name="CloseBtn" Content="Close" Style="{StaticResource FlatButton}" Tag="8" Width="100" Height="32"
+                HorizontalAlignment="Center" Margin="0,16,0,0" Click="Close_Click"/>
+    </StackPanel>
+</Window>

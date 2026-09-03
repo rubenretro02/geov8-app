@@ -4,6 +4,8 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- WinForms NotifyIcon: tray icon + balloon notifications (background mode) -->
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
@@ -11,9 +13,9 @@
     <AssemblyName>app</AssemblyName>
     <RootNamespace>GeoV10</RootNamespace>
     <ApplicationIcon>geo.ico</ApplicationIcon>
-    <Version>10.0.1.1</Version>
-    <FileVersion>10.0.1.1</FileVersion>
-    <AssemblyVersion>10.0.1.1</AssemblyVersion>
+    <Version>10.0.2.0</Version>
+    <FileVersion>10.0.2.0</FileVersion>
+    <AssemblyVersion>10.0.2.0</AssemblyVersion>
     <Product>Geo</Product>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- Single self-contained exe: nothing to install on the VMs -->
@@ -32,6 +34,14 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
     <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- UseWindowsForms adds these as global usings, which collide with WPF
+       (Application, Point, Brush, Button...). Drop the globals; TrayIcon.cs
+       imports System.Windows.Forms / System.Drawing explicitly. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
   </ItemGroup>
 
 </Project>
