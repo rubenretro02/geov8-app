@@ -202,7 +202,8 @@ public static class AllowedChecker
         IReadOnlyList<string> allowedCountries, IReadOnlyList<string> allowedStates)
     {
         if (string.IsNullOrEmpty(country)) return (false, "country");
-        if (!allowedCountries.Any(c => MatchesCountry(c, country))) return (false, "country");
+        // An empty list means "no restriction" - it must not fail every check
+        if (allowedCountries.Count > 0 && !allowedCountries.Any(c => MatchesCountry(c, country))) return (false, "country");
         if (allowedStates.Count > 0 && !allowedStates.Any(s => MatchesState(s, state))) return (false, "state");
         return (true, null);
     }
