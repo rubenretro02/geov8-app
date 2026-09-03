@@ -404,13 +404,13 @@ public partial class MainWindow : Window
 
         _isRunning = true;
         UpdateStatus("running");
-        SetStatusMessage("Starting...", B("TextSecondary"));
+        SetStatusMessage("", B("TextSecondary"));   // dashboard stays clean while running
 
         // WebView2 must run on the UI thread; the rest of the pipeline is async I/O
         Func<string, Task<bool>> activate = url => Dispatcher.InvokeAsync(() => LocationActivator.ActivateAsync(url)).Task.Unwrap();
         var runner = new CheckRunner(_license, _data, _config, activate);
         runner.Progress += p => Dispatcher.InvokeAsync(() => Circle.SetProgress(p));
-        runner.Status += s => Dispatcher.InvokeAsync(() => { Log.Line($"[check] {s}"); SetStatusMessage(s, B("TextSecondary")); });
+        runner.Status += s => Log.Line($"[check] {s}");   // steps go to geo.log only
 
         CheckResult result;
         try { result = await runner.RunAsync(lat, lon, useAuto); }
@@ -421,8 +421,8 @@ public partial class MainWindow : Window
         UpdateDetails();
         try { if (result.Success) SystemSounds.Asterisk.Play(); else SystemSounds.Hand.Play(); } catch { }
         Log.Line(result.Success ? "Check OK: Ready to work!" : $"Check FAILED: {string.Join(" | ", result.Errors)}");
-        SetStatusMessage(result.Success ? "Ready to work!" : result.Message,
-                         result.Success ? B("Success") : B("Error"));
+        // Clean dashboard: nothing on success (the thumbs-up says it); only the reason on failure
+        SetStatusMessage(result.Success ? "" : result.Message, B("Error"));
 
         var location = $"{_data.City}, {_data.State}";
         Stats.Record(result.Success);
