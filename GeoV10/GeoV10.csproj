@@ -13,9 +13,9 @@
     <AssemblyName>app</AssemblyName>
     <RootNamespace>GeoV10</RootNamespace>
     <ApplicationIcon>geo.ico</ApplicationIcon>
-    <Version>10.0.2.1</Version>
-    <FileVersion>10.0.2.1</FileVersion>
-    <AssemblyVersion>10.0.2.1</AssemblyVersion>
+    <Version>10.0.2.2</Version>
+    <FileVersion>10.0.2.2</FileVersion>
+    <AssemblyVersion>10.0.2.2</AssemblyVersion>
     <Product>Geo</Product>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- Single self-contained exe: nothing to install on the VMs -->
