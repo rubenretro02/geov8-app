@@ -1,6 +1,15 @@
 ###############################################
-# Geo V9.3.1.8 - Dashboard Application
-# New features in 9.3.1.8:
+# Geo V9.3.1.9 - Dashboard Application
+# New features in 9.3.1.9:
+# - FIX: Opening the app by hand no longer fires a background auto-check (and
+#        auto-close). The "just booted" (uptime) trigger is gone: the boot
+#        check now runs only on a real auto-start (--autostart), which the
+#        refreshed Run key / scheduled task reliably provide. So the check UI
+#        only appears when the user runs it, or when "Show on auto check" is on.
+# - FIX: Faster check. Reverse-geocode provider timeouts 15s -> 7s (up to ~24s
+#        saved when a provider stalls) and the Device Portal retry wait 2s -> 1s.
+#
+# Previous (9.3.1.8):
 # - NEW: Remove the Run-key startup delay (StartupDelayInMSec=0, a per-user
 #        non-admin write), so the Run-key launch fires immediately at logon
 #        instead of waiting out Explorer's startup throttle. The Scheduled
@@ -183,7 +192,7 @@ except ImportError:
     pass
 
 # App Version - IMPORTANT for auto-update
-APP_VERSION = "9.3.1.8"
+APP_VERSION = "9.3.1.9"
 
 # Startup Configuration
 # Set to True to enable copying app to Startup folder
@@ -2446,9 +2455,11 @@ class GeoApp(ctk.CTk):
         # 2. Running from Startup folder
         # 3. The PC has just booted - covers the case where the Registry entry
         #    is missing or stale, which used to force a manual Start after a reset
+        # Only a REAL auto-start runs the boot check. The old "just booted"
+        # (uptime) trigger fired a background check + auto-close when the user
+        # merely opened the app by hand soon after boot - removed.
         should_auto_run = ("--autostart" in sys.argv
-                           or is_running_from_startup()
-                           or self.is_system_just_booted())
+                           or is_running_from_startup())
 
         if not should_auto_run:
             print("Manual launch - skipping auto-check")
@@ -3185,7 +3196,7 @@ class GeoApp(ctk.CTk):
             d = requests.get(
                 f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&addressdetails=1",
                 headers={"User-Agent": "GeoApp/8.33"},
-                timeout=15
+                timeout=7
             ).json()
             print(f"Nominatim response: {d}")
             if "address" in d:
@@ -3202,7 +3213,7 @@ class GeoApp(ctk.CTk):
             print(f"Trying BigDataCloud for {lat}, {lon}")
             d = requests.get(
                 f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=en",
-                timeout=15
+                timeout=7
             ).json()
             print(f"BigDataCloud response: {d}")
             return {
@@ -3217,7 +3228,7 @@ class GeoApp(ctk.CTk):
             print(f"Trying geocode.xyz for {lat}, {lon}")
             d = requests.get(
                 f"https://geocode.xyz/{lat},{lon}?geoit=json",
-                timeout=15
+                timeout=7
             ).json()
             print(f"geocode.xyz response: {d}")
             if d.get("country"):
@@ -3452,7 +3463,7 @@ class GeoApp(ctk.CTk):
                     finish_error("Device Portal: Bad username/password")
                     return
                 update_progress(25)
-                time.sleep(2)
+                time.sleep(1)
                 portal_ok, portal_error = self.test_device_portal()
                 if not portal_ok:
                     if portal_error == "auth_failed":
