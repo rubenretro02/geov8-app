@@ -11,16 +11,20 @@
     <AssemblyName>app</AssemblyName>
     <RootNamespace>GeoV10</RootNamespace>
     <ApplicationIcon>geo.ico</ApplicationIcon>
-    <Version>10.0.0.0</Version>
-    <FileVersion>10.0.0.0</FileVersion>
-    <AssemblyVersion>10.0.0.0</AssemblyVersion>
+    <Version>10.0.1.0</Version>
+    <FileVersion>10.0.1.0</FileVersion>
+    <AssemblyVersion>10.0.1.0</AssemblyVersion>
     <Product>Geo</Product>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- Single self-contained exe: nothing to install on the VMs -->
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Compression keeps the bundle at ~64 MB (147 MB without). Defender's local
+         engine passes either way; the download block seen in the field is
+         reputation-based (unsigned, new file) and needs code signing, not this. -->
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishDocumentationFiles>false</PublishDocumentationFiles>
     <DebugType>none</DebugType>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>

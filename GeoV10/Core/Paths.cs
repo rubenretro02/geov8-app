@@ -21,4 +21,6 @@ public static class Paths
     public static string HwidCache => Path.Combine(AppData, "hwid_cache.json");
     public static string Log => Path.Combine(AppData, "geo.log");
     public static string WebView2Data => Path.Combine(AppData, "webview2");
+    public static string ShowFlag => Path.Combine(AppData, "show_window.flag");
+    public static string TaskXml => Path.Combine(AppData, "geo_task.xml");
 }

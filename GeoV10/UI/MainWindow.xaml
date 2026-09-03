@@ -157,6 +157,8 @@
                 <Border Style="{StaticResource Card}">
                     <StackPanel>
                         <TextBlock Text="Allowed Countries" Style="{StaticResource SectionTitle}" Margin="16,12,16,4"/>
+                        <TextBlock x:Name="LocationLockHint" Text="🔒 Set by your manager - contact them to change it"
+                                   Foreground="{StaticResource Warning}" FontSize="10" Margin="16,0,16,4" Visibility="Collapsed"/>
                         <TextBox x:Name="CountriesBox" Height="40" TextWrapping="Wrap" AcceptsReturn="True" VerticalContentAlignment="Top" Background="{StaticResource BgDark}" Margin="16,0,16,12"/>
                     </StackPanel>
                 </Border>

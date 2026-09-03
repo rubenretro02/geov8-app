@@ -20,9 +20,13 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _autoTimer = new();
     private readonly DispatcherTimer _countdownTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _dotsTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
+    private readonly DispatcherTimer _autoCloseTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _showFlagTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private DateTime? _nextCheckTime;
     private int _autoInterval = 5;
     private int _dotPhase;
+    private int _autoCloseRemaining;
+    private bool _startedHidden;
 
     private Brush B(string key) => (Brush)FindResource(key);
 
@@ -33,7 +37,28 @@ public partial class MainWindow : Window
         _autoTimer.Tick += AutoTimer_Tick;
         _countdownTimer.Tick += (_, _) => UpdateCountdown();
         _dotsTimer.Tick += (_, _) => { _dotPhase = (_dotPhase + 1) % 4; RunBtn.Content = new string('●', _dotPhase) + new string('○', 3 - _dotPhase); };
+        _autoCloseTimer.Tick += (_, _) => TickAutoClose();
+        _showFlagTimer.Tick += (_, _) => { if (SingleInstance.ConsumeShowRequest()) RestoreWindow(); };
         VersionLabel.Text = $"v{AppInfo.Version}";
+    }
+
+    /// <summary>Called once after the window is shown/hidden: register startup, watch for
+    /// show-requests from a second launch, and run the boot/auto-start check.</summary>
+    public void OnStartupComplete(bool startedHidden)
+    {
+        Log.Line($"OnStartupComplete(startedHidden={startedHidden})");
+        _startedHidden = startedHidden;
+        try { AutoStart.Ensure(); } catch (Exception e) { Log.Line($"AutoStart.Ensure: {e.Message}"); }
+        _showFlagTimer.Start();
+
+        if (AutoStart.LaunchedByAutostart || AutoStart.IsSystemJustBooted())
+        {
+            ReadConfigFromUi();
+            var haveCreds = _config.Username.Length > 0 && _config.Password.Length > 0
+                && (_config.GpsMode == "auto" || (_config.Latitude.Length > 0 && _config.Longitude.Length > 0));
+            if (haveCreds) { Log.Line("Auto-start detected - running check"); RunCheck(auto: true); }
+            else Log.Line("Auto-check skipped: missing configuration");
+        }
     }
 
     // ------------------------------------------------------------ startup
@@ -81,6 +106,21 @@ public partial class MainWindow : Window
         ShowOnAutoCheck.IsChecked = _config.ShowOnAutoCheck;
         if (_config.GpsMode == "auto") GpsAutoRadio.IsChecked = true; else GpsCustomRadio.IsChecked = true;
         GpsMode_Changed(this, new RoutedEventArgs());
+        ApplyLocationRules();
+    }
+
+    /// <summary>Enforce manager-pushed lists (and lock the fields), or hand control back.</summary>
+    private void ApplyLocationRules()
+    {
+        if (_license.LocationLocked)
+        {
+            _config.AllowedCountries = new List<string>(_license.EnforcedCountries);
+            _config.AllowedStates = new List<string>(_license.EnforcedStates);
+            CountriesBox.Text = string.Join(", ", _config.AllowedCountries);
+            StatesBox.Text = string.Join(", ", _config.AllowedStates);
+        }
+        CountriesBox.IsEnabled = StatesBox.IsEnabled = !_license.LocationLocked;
+        LocationLockHint.Visibility = _license.LocationLocked ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ReadConfigFromUi()
@@ -92,8 +132,11 @@ public partial class MainWindow : Window
         _config.Password = PasswordInput.Password.Trim();
         _config.Latitude = LatBox.Text.Trim();
         _config.Longitude = LonBox.Text.Trim();
-        _config.AllowedCountries = Split(CountriesBox.Text);
-        _config.AllowedStates = Split(StatesBox.Text);
+        if (!_license.LocationLocked)
+        {
+            _config.AllowedCountries = Split(CountriesBox.Text);
+            _config.AllowedStates = Split(StatesBox.Text);
+        }
         _config.ServiceInterval = string.IsNullOrWhiteSpace(IntervalBox.Text) ? "5" : IntervalBox.Text.Trim();
         _config.GpsMode = GpsAutoRadio.IsChecked == true ? "auto" : "custom";
         _config.ShowOnAutoCheck = ShowOnAutoCheck.IsChecked == true;
@@ -218,11 +261,71 @@ public partial class MainWindow : Window
         }
     }
 
-    // ------------------------------------------------------------ auto-close (stage 2 wires the hide/exit policy)
+    // ------------------------------------------------------------ auto-close / background / restore
 
     private void CancelAutoClose_Click(object sender, RoutedEventArgs e) => CancelAutoClose();
 
-    private void CancelAutoClose() => AutoClosePanel.Visibility = Visibility.Collapsed;
+    private void CancelAutoClose()
+    {
+        _autoCloseTimer.Stop();
+        AutoClosePanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void StartAutoCloseCountdown()
+    {
+        if (!IsVisible) return;   // hidden background check: nothing to count down
+        CancelAutoClose();
+        _autoCloseRemaining = 3;
+        AutoClosePanel.Visibility = Visibility.Visible;
+        TickAutoClose();
+        _autoCloseTimer.Start();
+    }
+
+    private void TickAutoClose()
+    {
+        if (_autoCloseRemaining <= 0) { FinishAutoClose(); return; }
+        AutoCloseLabel.Text = $"Closing in {_autoCloseRemaining}s";
+        _autoCloseRemaining--;
+    }
+
+    private void FinishAutoClose()
+    {
+        CancelAutoClose();
+        // With Auto-Check ON the monitoring loop must survive: hide instead of
+        // closing. Re-opening the exe re-shows this instance. With it OFF, close.
+        if (AutoSwitch.IsChecked == true)
+        {
+            Log.Line("Auto-close: hiding window, monitoring continues");
+            Hide();
+        }
+        else
+        {
+            Close();
+        }
+    }
+
+    private void RestoreWindow()
+    {
+        CancelAutoClose();
+        try
+        {
+            Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate();
+            Topmost = true; Topmost = false;
+        }
+        catch (Exception e) { Log.Line($"RestoreWindow: {e.Message}"); }
+    }
+
+    /// <summary>Hidden auto-check: the window stays hidden unless the check fails.</summary>
+    private void ShowIfSilentFailure()
+    {
+        if (_currentCheckAuto && ShowOnAutoCheck.IsChecked != true && !IsVisible)
+        {
+            Log.Line("Hidden auto-check failed - showing window");
+            RestoreWindow();
+        }
+    }
 
     // ------------------------------------------------------------ check
 
@@ -233,6 +336,9 @@ public partial class MainWindow : Window
         if (_isRunning) return;
         _currentCheckAuto = auto;
         CancelAutoClose();
+        // Pick up location rules changed in the manager since startup
+        await _license.RefreshLocationRulesAsync();
+        ApplyLocationRules();
         ReadConfigFromUi();
 
         if (_config.Username.Length == 0) { ShowSettings(this, new RoutedEventArgs()); MessageBox.Show("Username is required", "Settings Required", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
@@ -271,6 +377,9 @@ public partial class MainWindow : Window
         UpdateDetails();
         try { if (result.Success) SystemSounds.Asterisk.Play(); else SystemSounds.Hand.Play(); } catch { }
         Log.Line(result.Success ? "Check OK: Ready to work!" : $"Check FAILED: {string.Join(" | ", result.Errors)}");
+
+        if (result.Success) StartAutoCloseCountdown();
+        else ShowIfSilentFailure();
     }
 
     private void UpdateStatus(string status)

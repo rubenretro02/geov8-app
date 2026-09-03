@@ -27,6 +27,11 @@ public sealed class LicenseService
     public string AgentName { get; private set; } = "Agent";
     public int? DaysLeft { get; private set; }
 
+    /// <summary>Location rules pushed from the manager for this license (see ApplyLocationRules).</summary>
+    public bool LocationLocked { get; private set; }
+    public List<string> EnforcedCountries { get; private set; } = new();
+    public List<string> EnforcedStates { get; private set; } = new();
+
     public LicenseService()
     {
         var hw = HardwareId.Get();
@@ -144,6 +149,39 @@ public sealed class LicenseService
         DaysLeft = CalcDays(expiresAt);
     }
 
+    /// <summary>
+    /// With lock_location_settings on, the app enforces the license's allowed
+    /// countries/states and the user can't edit them - only the admin / creator
+    /// can, in the manager.
+    /// </summary>
+    private void ApplyLocationRules(JsonElement lic)
+    {
+        LocationLocked = Bool(lic, "lock_location_settings");
+        EnforcedCountries = StrList(lic, "allowed_countries");
+        EnforcedStates = StrList(lic, "allowed_states");
+        if (LocationLocked)
+            Log.Line($"Location rules enforced by manager: countries=[{string.Join(", ", EnforcedCountries)}] states=[{string.Join(", ", EnforcedStates)}]");
+    }
+
+    private static List<string> StrList(JsonElement e, string k)
+    {
+        if (!e.TryGetProperty(k, out var p) || p.ValueKind != JsonValueKind.Array) return new List<string>();
+        return p.EnumerateArray()
+            .Where(x => x.ValueKind == JsonValueKind.String)
+            .Select(x => x.GetString()!)
+            .Where(s => s.Length > 0)
+            .ToList();
+    }
+
+    /// <summary>Re-read the rules so a change made in the manager applies on the next check.</summary>
+    public async Task RefreshLocationRulesAsync()
+    {
+        if (string.IsNullOrEmpty(LicenseKey)) return;
+        var (ok, rows) = await FetchAsync("licenses",
+            $"license_key=eq.{LicenseKey}&select=lock_location_settings,allowed_countries,allowed_states");
+        if (ok && rows.Length > 0) ApplyLocationRules(rows[0]);
+    }
+
     /// <summary>Persistent activation: bind this machine to the license instead of locking the user out.</summary>
     private async Task<bool> RebindHwidAsync(string licenseKey, string previousHwid)
     {
@@ -197,6 +235,7 @@ public sealed class LicenseService
                 }
                 var expiresAt = Str(lic, "expires_at");
                 if (IsExpired(expiresAt)) return (false, "Expired");
+                ApplyLocationRules(lic);
 
                 var serverHwid = (Str(lic, "hwid") ?? "").Trim();
                 if (serverHwid != Hwid) await RebindHwidAsync(key, serverHwid);
@@ -227,6 +266,7 @@ public sealed class LicenseService
             if (!Bool(lic, "is_active")) return (false, "Deactivated");
             var expiresAt = Str(lic, "expires_at");
             if (IsExpired(expiresAt)) return (false, "Expired");
+            ApplyLocationRules(lic);
             var key = Str(lic, "license_key") ?? "";
             if ((Str(lic, "hwid") ?? "").Trim() != Hwid)
                 await PatchAsync("licenses", new { hwid = Hwid }, $"license_key=eq.{key}");
@@ -252,6 +292,7 @@ public sealed class LicenseService
             if (!Bool(lic, "is_active")) return (false, "Expired");
             var expiresAt = Str(lic, "expires_at");
             if (IsExpired(expiresAt)) return (false, "Expired");
+            ApplyLocationRules(lic);
 
             var existing = (Str(lic, "hwid") ?? "").Trim();
             if (existing != Hwid && !await RebindHwidAsync(licenseKey, existing))
