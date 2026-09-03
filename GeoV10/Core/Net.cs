@@ -10,12 +10,19 @@ public static class Net
         "https://api.ipify.org", "https://www.google.com", "https://www.cloudflare.com",
     };
 
+    /// <summary>Probes all endpoints in parallel; the first success wins (was serial, 5s each).</summary>
     public static async Task<bool> HasInternetAsync()
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        foreach (var url in Probes)
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+        var probes = Probes.Select(async url =>
         {
-            try { using var _ = await http.GetAsync(url); return true; } catch { }
+            try { using var _ = await http.GetAsync(url); return true; } catch { return false; }
+        }).ToList();
+        while (probes.Count > 0)
+        {
+            var done = await Task.WhenAny(probes);
+            if (await done) return true;
+            probes.Remove(done);
         }
         return false;
     }

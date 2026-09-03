@@ -44,7 +44,7 @@ public sealed class DevicePortal
         {
             try { using var _ = await _http.GetAsync(BaseUri + ep); } catch { }
         }
-        await Task.Delay(1000);
+        await Task.Delay(500);
     }
 
     /// <summary>

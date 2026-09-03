@@ -35,8 +35,10 @@ public static class LocationActivator
             web.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
 
             await NavigateAsync(web, url, TimeSpan.FromSeconds(8));
-            await Task.Delay(2000);
+            await Task.Delay(1000);
 
+            // The second navigation is only needed after clicking through the
+            // certificate prompt; skipping it otherwise saves ~3s at boot.
             if ((web.Source?.ToString() ?? "").Contains("certprompt", StringComparison.OrdinalIgnoreCase))
             {
                 try
@@ -46,13 +48,12 @@ public static class LocationActivator
                     await Task.Delay(500);
                     await web.CoreWebView2.ExecuteScriptAsync(
                         "document.querySelectorAll('button').forEach(b=>{if(b.textContent.toLowerCase().includes('continue'))b.click()});");
-                    await Task.Delay(2000);
+                    await Task.Delay(1000);
                 }
                 catch { }
+                await NavigateAsync(web, url, TimeSpan.FromSeconds(8));
+                await Task.Delay(1000);
             }
-
-            await NavigateAsync(web, url, TimeSpan.FromSeconds(8));
-            await Task.Delay(2000);
             return true;
         }
         catch (Exception e)

@@ -27,9 +27,15 @@ public static class HardwareId
 
     public static HardwareInfo Get()
     {
-        var rawBios = Wmi("Win32_BIOS", "SerialNumber");
-        var rawBoard = Wmi("Win32_BaseBoard", "SerialNumber");
-        var rawUuid = Wmi("Win32_ComputerSystemProduct", "UUID");
+        // Once the HWID is frozen in the cache the WMI values only feed the
+        // fuzzy-candidate list, so a blank field is a stable answer, not a
+        // transient failure: read once, no 2s retries (saved ~8s per launch on
+        // VMs whose BIOS/BaseBoard serials are empty).
+        var cached = LoadCached();
+        var attempts = cached != null ? 1 : 3;
+        var rawBios = Wmi("Win32_BIOS", "SerialNumber", attempts);
+        var rawBoard = Wmi("Win32_BaseBoard", "SerialNumber", attempts);
+        var rawUuid = Wmi("Win32_ComputerSystemProduct", "UUID", attempts);
 
         var bios = Clean(rawBios);
         var board = Clean(rawBoard);
@@ -59,7 +65,6 @@ public static class HardwareId
             }
         }
 
-        var cached = LoadCached();
         string primary;
         if (cached != null)
         {
